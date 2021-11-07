@@ -26,6 +26,7 @@ type Plugin interface {
 	ApplyMiddlewarePublicMux(http.Handler) http.Handler
 	ApplyMiddlewarePrivateMux(http.Handler) http.Handler
 	ModifyExtensions(ctx context.Context, e *queryExecution, extensions map[string]interface{}) error
+	ResponseHeaders(headers http.Header)
 }
 
 // BasePlugin is an empty plugin. It can be embedded by any plugin as a way to avoid
@@ -65,6 +66,8 @@ func (p *BasePlugin) ApplyMiddlewarePrivateMux(h http.Handler) http.Handler {
 func (p *BasePlugin) ModifyExtensions(ctx context.Context, e *queryExecution, extensions map[string]interface{}) error {
 	return nil
 }
+
+func (p *BasePlugin) ResponseHeaders(headers http.Header) {}
 
 var registeredPlugins = map[string]Plugin{}
 

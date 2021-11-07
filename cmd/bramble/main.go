@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/movio/bramble"
-	_ "github.com/movio/bramble/plugins"
+	"github.com/MithrilTechnologies/bramble"
+	_ "github.com/MithrilTechnologies/bramble/plugins"
 )
 
 func main() {

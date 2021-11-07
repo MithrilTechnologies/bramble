@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/99designs/gqlgen/graphql/playground"
-	"github.com/movio/bramble"
+	"github.com/MithrilTechnologies/bramble"
 )
 
 func init() {
