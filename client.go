@@ -122,7 +122,7 @@ func (c *GraphQLClient) Request(ctx context.Context, url string, request *Reques
 
 func withResponseHeaders(headers http.Header, out interface{}) {
 	if outPtr, isPtr := out.(*interface{}); isPtr {
-		if response, isMap := (*outPtr).(*map[string]interface{}); isMap {
+		if response, isMap := (*outPtr).(*map[string]interface{}); isMap && (*response) != nil {
 			(*response)["headers"] = headers
 		}
 	}
