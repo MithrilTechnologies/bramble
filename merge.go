@@ -59,7 +59,7 @@ func buildFieldURLMap(services ...*Service) FieldURLMap {
 	result := FieldURLMap{}
 	for _, rs := range services {
 		for _, t := range rs.Schema.Types {
-			if t.Kind != ast.Object || isGraphQLBuiltinName(t.Name) || t.Name == serviceObjectName {
+			if !t.IsCompositeType() || isGraphQLBuiltinName(t.Name) || t.Name == serviceObjectName {
 				continue
 			}
 			for _, f := range mergeableFields(t) {
@@ -109,7 +109,7 @@ func buildBoundaryFieldsMap(services ...*Service) BoundaryFieldsMap {
 					array = true
 				}
 
-				result.RegisterField(rs.ServiceURL, typeName, f.Name, array)
+				result.RegisterField(rs.ServiceURL, typeName, f.Name, f.Arguments[0].Name, array)
 			}
 		}
 	}
@@ -409,13 +409,13 @@ func isNodeField(f *ast.FieldDefinition) bool {
 		return false
 	}
 	arg := f.Arguments[0]
-	return arg.Name == idFieldName &&
+	return arg.Name == IdFieldName &&
 		isIDType(arg.Type) &&
 		isNullableTypeNamed(f.Type, nodeInterfaceName)
 }
 
 func isIDField(f *ast.FieldDefinition) bool {
-	return f.Name == idFieldName && len(f.Arguments) == 0 && isIDType(f.Type)
+	return f.Name == IdFieldName && len(f.Arguments) == 0 && isIDType(f.Type)
 }
 
 func isServiceField(f *ast.FieldDefinition) bool {

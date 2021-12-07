@@ -150,7 +150,7 @@ func (q *queryExecution) writeExecutionResult(step *QueryPlanStep, data interfac
 
 func (q *queryExecution) executeChildStep(step *QueryPlanStep, boundaryIDs []string) error {
 	atomic.AddInt32(&q.requestCount, 1)
-	if q.requestCount > q.maxRequest {
+	if atomic.LoadInt32(&q.requestCount) > q.maxRequest {
 		return fmt.Errorf("exceeded max requests of %v", q.maxRequest)
 	}
 
@@ -283,10 +283,10 @@ func (q *queryExecution) createGQLErrors(step *QueryPlanStep, err error) gqlerro
 // crawling for ids:
 // [
 // 	 {
-//     "_id": "MOVIE1",
+//     "_bramble_id": "MOVIE1",
 //     "compTitles": [
 //       {
-//   	   "_id": "1"
+//   	   "_bramble_id": "1"
 // 		 }
 //	   ]
 //   }
@@ -427,7 +427,7 @@ func buildBoundaryQueryDocuments(ctx context.Context, schema *ast.Schema, step *
 			qids = append(qids, fmt.Sprintf("%q", id))
 		}
 		idsQL := fmt.Sprintf("[%s]", strings.Join(qids, ", "))
-		return []string{fmt.Sprintf(`{ _result: %s(ids: %s) %s }`, parentTypeBoundaryField.Field, idsQL, selectionSetQL)}, nil
+		return []string{fmt.Sprintf(`{ _result: %s(%s: %s) %s }`, parentTypeBoundaryField.Field, parentTypeBoundaryField.Argument, idsQL, selectionSetQL)}, nil
 	}
 
 	var (
@@ -437,7 +437,7 @@ func buildBoundaryQueryDocuments(ctx context.Context, schema *ast.Schema, step *
 	for _, batch := range batchBy(ids, batchSize) {
 		var selections []string
 		for _, id := range batch {
-			selection := fmt.Sprintf("%s: %s(id: %q) %s", fmt.Sprintf("_%d", selectionIndex), parentTypeBoundaryField.Field, id, selectionSetQL)
+			selection := fmt.Sprintf("%s: %s(%s: %q) %s", fmt.Sprintf("_%d", selectionIndex), parentTypeBoundaryField.Field, parentTypeBoundaryField.Argument, id, selectionSetQL)
 			selections = append(selections, selection)
 			selectionIndex++
 		}
@@ -520,7 +520,7 @@ func mergeExecutionResultsRec(src interface{}, dst interface{}, insertionPoint [
 					}
 					if srcID == dstID {
 						for k, v := range result {
-							if k == "_id" || k == "id" {
+							if k == "_bramble_id" {
 								continue
 							}
 
@@ -570,15 +570,11 @@ func mergeExecutionResultsRec(src interface{}, dst interface{}, insertionPoint [
 }
 
 func boundaryIDFromMap(boundaryMap map[string]interface{}) (string, error) {
-	id, ok := boundaryMap["_id"].(string)
+	id, ok := boundaryMap["_bramble_id"].(string)
 	if ok {
 		return id, nil
 	}
-	id, ok = boundaryMap["id"].(string)
-	if ok {
-		return id, nil
-	}
-	return "", errors.New("boundaryIDFromMap: 'id' or '_id' not found")
+	return "", errors.New("boundaryIDFromMap: \"_bramble_id\" not found")
 }
 
 func getBoundaryFieldResults(src []interface{}) ([]map[string]interface{}, error) {
@@ -829,19 +825,22 @@ func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, re
 //   2. if the target fragments are an implementation of an abstract type, we need to use the __typename from the response body to check which
 //   implementation was resolved. Any fragments that do not match are dropped from the selection set.
 func unionAndTrimSelectionSet(objectTypename string, schema *ast.Schema, selectionSet ast.SelectionSet) (ast.SelectionSet, error) {
-	return unionAndTrimSelectionSetRec(objectTypename, schema, selectionSet, map[string]bool{})
+	return unionAndTrimSelectionSetRec(objectTypename, schema, selectionSet, map[string]*ast.Field{})
 }
 
-func unionAndTrimSelectionSetRec(objectTypename string, schema *ast.Schema, selectionSet ast.SelectionSet, seenFields map[string]bool) (ast.SelectionSet, error) {
+func unionAndTrimSelectionSetRec(objectTypename string, schema *ast.Schema, selectionSet ast.SelectionSet, seenFields map[string]*ast.Field) (ast.SelectionSet, error) {
 	var filteredSelectionSet ast.SelectionSet
 	for _, selection := range selectionSet {
 		switch selection := selection.(type) {
 		case *ast.Field:
-			if seenFields[selection.Alias] {
-				continue
+			if seenField, ok := seenFields[selection.Alias]; ok {
+				if seenField.Name == selection.Name && seenField.SelectionSet != nil && selection.SelectionSet != nil {
+					seenField.SelectionSet = append(seenField.SelectionSet, selection.SelectionSet...)
+				}
+			} else {
+				seenFields[selection.Alias] = selection
+				filteredSelectionSet = append(filteredSelectionSet, selection)
 			}
-			seenFields[selection.Alias] = true
-			filteredSelectionSet = append(filteredSelectionSet, selection)
 		case *ast.InlineFragment:
 			fragment := selection
 			if fragment.ObjectDefinition.IsAbstractType() &&
@@ -867,7 +866,7 @@ func unionAndTrimSelectionSetRec(objectTypename string, schema *ast.Schema, sele
 }
 
 func extractAndCastTypenameField(result map[string]interface{}) string {
-	typeNameInterface, ok := result["__typename"]
+	typeNameInterface, ok := result["_bramble__typename"]
 	if !ok {
 		return ""
 	}

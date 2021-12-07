@@ -2,12 +2,13 @@ package bramble
 
 import (
 	"context"
-	"strings"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/vektah/gqlparser/v2/ast"
+	"github.com/vektah/gqlparser/v2/gqlerror"
 )
 
 // QueryPlanStep is a single execution step
@@ -66,7 +67,7 @@ func Plan(ctx *PlanningContext) (*QueryPlan, error) {
 		return nil, fmt.Errorf("not implemented")
 	}
 
-	steps, err := createSteps(ctx, nil, parentType, "", ctx.Operation.SelectionSet, false)
+	steps, err := createSteps(ctx, nil, parentType, "", ctx.Operation.SelectionSet)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +76,7 @@ func Plan(ctx *PlanningContext) (*QueryPlan, error) {
 	}, nil
 }
 
-func createSteps(ctx *PlanningContext, insertionPoint []string, parentType, parentLocation string, selectionSet ast.SelectionSet, childstep bool) ([]*QueryPlanStep, error) {
+func createSteps(ctx *PlanningContext, insertionPoint []string, parentType string, parentLocation string, selectionSet ast.SelectionSet) ([]*QueryPlanStep, error) {
 	var result []*QueryPlanStep
 
 	routedSelectionSet, err := routeSelectionSet(ctx, parentType, parentLocation, selectionSet)
@@ -84,7 +85,7 @@ func createSteps(ctx *PlanningContext, insertionPoint []string, parentType, pare
 	}
 
 	for location, selectionSet := range routedSelectionSet {
-		selectionSetForLocation, childrenSteps, err := extractSelectionSet(ctx, insertionPoint, parentType, selectionSet, location, childstep)
+		selectionSetForLocation, childrenSteps, err := extractSelectionSet(ctx, insertionPoint, parentType, selectionSet, location)
 
 		if err != nil {
 			return nil, err
@@ -115,30 +116,30 @@ func createSteps(ctx *PlanningContext, insertionPoint []string, parentType, pare
 	return result, nil
 }
 
-func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentType string, input ast.SelectionSet, location string, childstep bool) (ast.SelectionSet, []*QueryPlanStep, error) {
+var reservedAliases = map[string]string{
+	"_bramble__typename": "__typename",
+	"_bramble_id":        IdFieldName,
+}
+
+func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentType string, input ast.SelectionSet, location string) (ast.SelectionSet, []*QueryPlanStep, error) {
 	var selectionSetResult []ast.Selection
 	var childrenStepsResult []*QueryPlanStep
 	var remoteSelections []ast.Selection
 	for _, selection := range input {
 		switch selection := selection.(type) {
 		case *ast.Field:
-			if parentType != queryObjectName && parentType != mutationObjectName && ctx.IsBoundary[parentType] && selection.Name == "id" {
+			for reservedAlias, requiredName := range reservedAliases {
+				if selection.Alias == reservedAlias && selection.Name != requiredName {
+					return nil, nil, gqlerror.Errorf("%s.%s: alias \"%s\" is reserved for system use", strings.Join(insertionPoint, "."), reservedAlias, reservedAlias)
+				}
+			}
+			if parentType != queryObjectName && parentType != mutationObjectName && ctx.IsBoundary[parentType] && selection.Name == IdFieldName {
 				selectionSetResult = append(selectionSetResult, selection)
 				continue
 			}
 			loc, err := ctx.Locations.URLFor(parentType, location, selection.Name)
-			if err != nil {
-				// namespace
-				subSS, steps, err := extractSelectionSet(ctx, append(insertionPoint, selection.Name), selection.Definition.Type.Name(), selection.SelectionSet, location, childstep)
-				if err != nil {
-					return nil, nil, err
-				}
-				selection.SelectionSet = subSS
-				selectionSetResult = append(selectionSetResult, selection)
-				childrenStepsResult = append(childrenStepsResult, steps...)
-				continue
-			}
-			if loc != location {
+			// Errors are returned for unmapped namespace/interface locations (needs refactor)
+			if err == nil && loc != location {
 				// field transitions to another service location
 				remoteSelections = append(remoteSelections, selection)
 			} else if selection.SelectionSet == nil {
@@ -146,18 +147,17 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 				selectionSetResult = append(selectionSetResult, selection)
 			} else {
 				// field is a composite type in the current service
-				newField := *selection
 				selectionSet, childrenSteps, err := extractSelectionSet(
 					ctx,
 					append(insertionPoint, selection.Alias),
 					selection.Definition.Type.Name(),
 					selection.SelectionSet,
 					location,
-					childstep,
 				)
 				if err != nil {
 					return nil, nil, err
 				}
+				newField := *selection
 				newField.SelectionSet = selectionSet
 				selectionSetResult = append(selectionSetResult, &newField)
 				childrenStepsResult = append(childrenStepsResult, childrenSteps...)
@@ -169,14 +169,11 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 				selection.TypeCondition,
 				selection.SelectionSet,
 				location,
-				childstep,
 			)
 			if err != nil {
 				return nil, nil, err
 			}
-			if !selectionSetHasFieldNamed(selectionSet, "__typename") {
-				selectionSet = append(selectionSet, &ast.Field{Alias: "__typename", Name: "__typename", Definition: &ast.FieldDefinition{Name: "__typename", Type: ast.NamedType("String", nil)}})
-			}
+			selectionSet = append(selectionSet, &ast.Field{Alias: "_bramble__typename", Name: "__typename", Definition: &ast.FieldDefinition{Name: "__typename", Type: ast.NamedType("String", nil)}})
 			inlineFragment := *selection
 			inlineFragment.SelectionSet = selectionSet
 			selectionSetResult = append(selectionSetResult, &inlineFragment)
@@ -188,14 +185,11 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 				selection.Definition.TypeCondition,
 				selection.Definition.SelectionSet,
 				location,
-				childstep,
 			)
 			if err != nil {
 				return nil, nil, err
 			}
-			if !selectionSetHasFieldNamed(selectionSet, "__typename") {
-				selectionSet = append(selectionSet, &ast.Field{Alias: "__typename", Name: "__typename", Definition: &ast.FieldDefinition{Name: "__typename", Type: ast.NamedType("String", nil)}})
-			}
+			selectionSet = append(selectionSet, &ast.Field{Alias: "_bramble__typename", Name: "__typename", Definition: &ast.FieldDefinition{Name: "__typename", Type: ast.NamedType("String", nil)}})
 			inlineFragment := ast.InlineFragment{
 				TypeCondition: selection.Definition.TypeCondition,
 				SelectionSet:  selectionSet,
@@ -209,7 +203,7 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 
 	if len(remoteSelections) > 0 {
 		// Create child steps for all remote field selections
-		childrenSteps, err := createSteps(ctx, insertionPoint, parentType, location, remoteSelections, true)
+		childrenSteps, err := createSteps(ctx, insertionPoint, parentType, location, remoteSelections)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -234,10 +228,10 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 	}
 
 	parentDef := ctx.Schema.Types[parentType]
-	// For abstract types, add an id fragment for all possible boundary
-	// implementations. This assures that abstract boundaries always return
-	// with an id, even if they didn't make a selection on the returned type.
 	if parentDef.IsAbstractType() {
+		// For abstract types, add an id fragment for all possible boundary
+		// implementations. This assures that abstract boundaries always return
+		// with an id, even if they didn't make a selection on the returned type
 		for implementationName, abstractTypes := range ctx.Schema.Implements {
 			if !ctx.IsBoundary[implementationName] {
 				continue
@@ -247,40 +241,33 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 					continue
 				}
 				implementationType := ctx.Schema.Types[implementationName]
-				possibleId := &ast.InlineFragment{
-					TypeCondition: implementationName,
-					SelectionSet: []ast.Selection{
-						&ast.Field{
-							Alias:      "_id",
-							Name:       "id",
-							Definition: implementationType.Fields.ForName("id"),
-						},
-					},
-					ObjectDefinition: implementationType,
+
+				if idDef := implementationType.Fields.ForName(IdFieldName); idDef != nil {
+					possibleId := &ast.InlineFragment{
+						TypeCondition:    implementationName,
+						SelectionSet:     []ast.Selection{&ast.Field{Alias: "_bramble_id", Name: IdFieldName, Definition: idDef}},
+						ObjectDefinition: implementationType,
+					}
+					selectionSetResult = append(selectionSetResult, possibleId)
 				}
-				selectionSetResult = append([]ast.Selection{possibleId}, selectionSetResult...)
 				break
 			}
 		}
-	// Otherwise, add an id selection to boundary types where the result
-	// will be merged with another step (i.e.: has children or is a child step).
-	} else if parentType != queryObjectName &&
-		parentType != mutationObjectName &&
-		ctx.IsBoundary[parentType] &&
-		(childstep || len(childrenStepsResult) > 0) &&
-		parentDef.Fields.ForName("id") != nil &&
-		!selectionSetHasFieldNamed(selectionSetResult, "id") {
-		id := &ast.Field{
-			Alias:      "_id",
-			Name:       "id",
-			Definition: parentDef.Fields.ForName("id"),
+		selectionSetResult = append(selectionSetResult, &ast.Field{
+			Alias:      "_bramble__typename",
+			Name:       "__typename",
+			Definition: &ast.FieldDefinition{Name: "__typename", Type: ast.NamedType("String", nil)},
+		})
+	} else if parentType != queryObjectName && parentType != mutationObjectName && ctx.IsBoundary[parentType] {
+		// Otherwise, add an id selection to all boundary types
+		if idDef := parentDef.Fields.ForName(IdFieldName); idDef != nil {
+			selectionSetResult = append(selectionSetResult, &ast.Field{Alias: "_bramble_id", Name: IdFieldName, Definition: idDef})
 		}
-		selectionSetResult = append([]ast.Selection{id}, selectionSetResult...)
 	}
 	return selectionSetResult, childrenStepsResult, nil
 }
 
-func routeSelectionSet(ctx *PlanningContext, parentType, parentLocation string, input ast.SelectionSet) (map[string]ast.SelectionSet, error) {
+func routeSelectionSet(ctx *PlanningContext, parentType string, parentLocation string, input ast.SelectionSet) (map[string]ast.SelectionSet, error) {
 	result := map[string]ast.SelectionSet{}
 	if parentLocation == "" {
 		// if we're at the root, we extract the selection set for each service
@@ -360,16 +347,6 @@ func filterSelectionSetByLoc(ctx *PlanningContext, ss ast.SelectionSet, loc, par
 	return res
 }
 
-func selectionSetHasFieldNamed(selectionSet []ast.Selection, fieldName string) bool {
-	for _, selection := range selectionSet {
-		field, ok := selection.(*ast.Field)
-		if ok && field.Name == fieldName {
-			return true
-		}
-	}
-	return false
-}
-
 // FieldURLMap maps fields to service URLs
 type FieldURLMap map[string]string
 
@@ -399,6 +376,8 @@ func (m FieldURLMap) keyFor(parent string, field string) string {
 // BoundaryField contains the name and format for a boundary query
 type BoundaryField struct {
 	Field string
+	// Name of the received id argument
+	Argument string
 	// Whether the query is in the array format
 	Array bool
 }
@@ -407,7 +386,7 @@ type BoundaryField struct {
 type BoundaryFieldsMap map[string]map[string]BoundaryField
 
 // RegisterField registers a boundary field
-func (m BoundaryFieldsMap) RegisterField(serviceURL, typeName, field string, array bool) {
+func (m BoundaryFieldsMap) RegisterField(serviceURL, typeName string, field string, argument string, array bool) {
 	if _, ok := m[serviceURL]; !ok {
 		m[serviceURL] = make(map[string]BoundaryField)
 	}
@@ -418,7 +397,7 @@ func (m BoundaryFieldsMap) RegisterField(serviceURL, typeName, field string, arr
 		return
 	}
 
-	m[serviceURL][typeName] = BoundaryField{Field: field, Array: array}
+	m[serviceURL][typeName] = BoundaryField{Field: field, Argument: argument, Array: array}
 }
 
 // Query returns the boundary field for the given service and type
