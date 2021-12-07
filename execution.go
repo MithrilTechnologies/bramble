@@ -70,9 +70,15 @@ func (s *ExecutableSchema) UpdateSchema(forceRebuild bool) error {
 	var services []*Service
 	var schemas []*ast.Schema
 	var updatedServices []string
-	var invalidschema float64 = 0
+	var invalidSchema bool
 
-	defer func() { promInvalidSchema.Set(invalidschema) }()
+	defer func() {
+		if invalidSchema {
+			promInvalidSchema.Set(1)
+		} else {
+			promInvalidSchema.Set(0)
+		}
+	}()
 
 	promServiceUpdateError.Reset()
 
@@ -85,7 +91,7 @@ func (s *ExecutableSchema) UpdateSchema(forceRebuild bool) error {
 		updated, err := s.Update()
 		if err != nil {
 			promServiceUpdateError.WithLabelValues(s.ServiceURL).Inc()
-			invalidschema = 1
+			invalidSchema, forceRebuild = true, true
 			logger.WithError(err).Error("unable to update service")
 			// Ignore this service in this update
 			continue
@@ -104,7 +110,7 @@ func (s *ExecutableSchema) UpdateSchema(forceRebuild bool) error {
 		log.Info("rebuilding merged schema")
 		schema, err := MergeSchemas(schemas...)
 		if err != nil {
-			invalidschema = 1
+			invalidSchema = true
 			return fmt.Errorf("update of service %v caused schema error: %w", updatedServices, err)
 		}
 
