@@ -13,7 +13,7 @@ import (
 	"github.com/vektah/gqlparser/v2/gqlerror"
 )
 
-func newExecutableSchema(plugins []Plugin, maxRequestsPerQuery int64, client *GraphQLClient, services ...*Service) *ExecutableSchema {
+func NewExecutableSchema(plugins []Plugin, maxRequestsPerQuery int64, client *GraphQLClient, services ...*Service) *ExecutableSchema {
 	serviceMap := make(map[string]*Service)
 
 	for _, s := range services {
@@ -82,11 +82,7 @@ func (s *ExecutableSchema) UpdateSchema(forceRebuild bool) error {
 	promServiceUpdateError.Reset()
 
 	for url, s := range s.Services {
-		logger := log.WithFields(log.Fields{
-			"url":     url,
-			"version": s.Version,
-			"service": s.Name,
-		})
+		logger := log.WithField("url", url)
 		updated, err := s.Update()
 		if err != nil {
 			promServiceUpdateError.WithLabelValues(s.ServiceURL).Inc()
@@ -95,9 +91,13 @@ func (s *ExecutableSchema) UpdateSchema(forceRebuild bool) error {
 			// Ignore this service in this update
 			continue
 		}
+		logger = log.WithFields(log.Fields{
+			"version": s.Version,
+			"service": s.Name,
+		})
 
 		if updated {
-			logger.Info("service was upgraded")
+			logger.Info("service was updated")
 			updatedServices = append(updatedServices, s.Name)
 		}
 
@@ -201,12 +201,6 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 		}
 		if debugInfo.Plan {
 			extensions["plan"] = plan
-		}
-	}
-
-	for _, plugin := range s.plugins {
-		if err := plugin.ModifyExtensions(ctx, qe, extensions); err != nil {
-			AddField(ctx, fmt.Sprintf("%s-plugin-error", plugin.ID()), err.Error())
 		}
 	}
 

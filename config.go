@@ -3,6 +3,7 @@ package bramble
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,8 @@ type Config struct {
 	Plugins                []PluginConfig
 	// Config extensions that can be shared among plugins
 	Extensions map[string]json.RawMessage
+	// HTTP client to customize for downstream services query
+	QueryHTTPClient *http.Client
 
 	plugins          []Plugin
 	executableSchema *ExecutableSchema
@@ -264,8 +267,12 @@ func (c *Config) Init() error {
 		services = append(services, NewService(s))
 	}
 
-	queryClient := NewClient(WithMaxResponseSize(c.MaxServiceResponseSize), WithUserAgent(GenerateUserAgent("query")))
-	es := newExecutableSchema(c.plugins, c.MaxRequestsPerQuery, queryClient, services...)
+	queryClientOptions := []ClientOpt{WithMaxResponseSize(c.MaxServiceResponseSize), WithUserAgent(GenerateUserAgent("query"))}
+	if c.QueryHTTPClient != nil {
+		queryClientOptions = append(queryClientOptions, WithHTTPClient(c.QueryHTTPClient))
+	}
+	queryClient := NewClient(queryClientOptions...)
+	es := NewExecutableSchema(c.plugins, c.MaxRequestsPerQuery, queryClient, services...)
 	err = es.UpdateSchema(true)
 	if err != nil {
 		return err
