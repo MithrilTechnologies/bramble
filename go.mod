@@ -1,4 +1,4 @@
-module github.com/movio/bramble
+module github.com/MithrilTechnologies/bramble
 
 go 1.17
 

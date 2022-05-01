@@ -13,7 +13,7 @@ COPY *.go /workspace/
 COPY cmd /workspace/cmd
 COPY plugins /workspace/plugins
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-X 'github.com/movio/bramble.Version=$VERSION'" -o bramble ./cmd/bramble
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-X 'github.com/MithrilTechnologies/bramble.Version=$VERSION'" -o bramble ./cmd/bramble
 
 FROM gcr.io/distroless/static
 

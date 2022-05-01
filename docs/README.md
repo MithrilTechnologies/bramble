@@ -63,4 +63,4 @@ Bramble provides a common-sense approach to GraphQL federation implemented in Go
 
 - [Nautilus](https://github.com/nautilus/gateway): provided a lot of inspiration for Bramble, and has been improved upon with bug fixes and additional features (fine-grained permissions, namespaces, better plugins, configuration hot-reloading). Bramble is a recommended successor.
 
-Bramble is a central piece of software for [Movio](https://movio.co) products and thus is actively maintained and developed.
+Bramble is a central piece of software for [Movio](https://MithrilTechnologies.co) products and thus is actively maintained and developed.

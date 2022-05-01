@@ -1,4 +1,4 @@
-module github.com/movio/bramble/examples/gqlgen-server
+module github.com/MithrilTechnologies/bramble/examples/gqlgen-server
 
 go 1.17
 

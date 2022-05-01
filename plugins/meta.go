@@ -8,9 +8,9 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/MithrilTechnologies/bramble"
 	"github.com/graph-gophers/graphql-go"
 	"github.com/graph-gophers/graphql-go/relay"
-	"github.com/movio/bramble"
 	"github.com/vektah/gqlparser/v2/ast"
 )
 
