@@ -118,7 +118,7 @@ func createSteps(ctx *PlanningContext, insertionPoint []string, parentType strin
 
 var reservedAliases = map[string]string{
 	"_bramble__typename": "__typename",
-	"_bramble_id":        "id",
+	"_bramble_id":        IdFieldName,
 }
 
 func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentType string, input ast.SelectionSet, location string) (ast.SelectionSet, []*QueryPlanStep, error) {
@@ -133,23 +133,13 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 					return nil, nil, gqlerror.Errorf("%s.%s: alias \"%s\" is reserved for system use", strings.Join(insertionPoint, "."), reservedAlias, reservedAlias)
 				}
 			}
-			if parentType != queryObjectName && parentType != mutationObjectName && ctx.IsBoundary[parentType] && selection.Name == "id" {
+			if parentType != queryObjectName && parentType != mutationObjectName && ctx.IsBoundary[parentType] && selection.Name == IdFieldName {
 				selectionSetResult = append(selectionSetResult, selection)
 				continue
 			}
 			loc, err := ctx.Locations.URLFor(parentType, location, selection.Name)
-			if err != nil {
-				// namespace
-				subSS, steps, err := extractSelectionSet(ctx, append(insertionPoint, selection.Name), selection.Definition.Type.Name(), selection.SelectionSet, location)
-				if err != nil {
-					return nil, nil, err
-				}
-				selection.SelectionSet = subSS
-				selectionSetResult = append(selectionSetResult, selection)
-				childrenStepsResult = append(childrenStepsResult, steps...)
-				continue
-			}
-			if loc != location {
+			// Errors are returned for unmapped namespace/interface locations (needs refactor)
+			if err == nil && loc != location {
 				// field transitions to another service location
 				remoteSelections = append(remoteSelections, selection)
 			} else if selection.SelectionSet == nil {
@@ -157,7 +147,6 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 				selectionSetResult = append(selectionSetResult, selection)
 			} else {
 				// field is a composite type in the current service
-				newField := *selection
 				selectionSet, childrenSteps, err := extractSelectionSet(
 					ctx,
 					append(insertionPoint, selection.Alias),
@@ -168,6 +157,7 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 				if err != nil {
 					return nil, nil, err
 				}
+				newField := *selection
 				newField.SelectionSet = selectionSet
 				selectionSetResult = append(selectionSetResult, &newField)
 				childrenStepsResult = append(childrenStepsResult, childrenSteps...)
@@ -238,6 +228,9 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 	}
 
 	parentDef := ctx.Schema.Types[parentType]
+	if parentDef == nil {
+		return nil, nil, fmt.Errorf("definition is nil for parentType %v", parentType)
+	}
 	if parentDef.IsAbstractType() {
 		// For abstract types, add an id fragment for all possible boundary
 		// implementations. This assures that abstract boundaries always return
@@ -252,10 +245,10 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 				}
 				implementationType := ctx.Schema.Types[implementationName]
 
-				if idDef := implementationType.Fields.ForName("id"); idDef != nil {
+				if idDef := implementationType.Fields.ForName(IdFieldName); idDef != nil {
 					possibleId := &ast.InlineFragment{
 						TypeCondition:    implementationName,
-						SelectionSet:     []ast.Selection{&ast.Field{Alias: "_bramble_id", Name: "id", Definition: idDef}},
+						SelectionSet:     []ast.Selection{&ast.Field{Alias: "_bramble_id", Name: IdFieldName, Definition: idDef}},
 						ObjectDefinition: implementationType,
 					}
 					selectionSetResult = append(selectionSetResult, possibleId)
@@ -270,8 +263,8 @@ func extractSelectionSet(ctx *PlanningContext, insertionPoint []string, parentTy
 		})
 	} else if parentType != queryObjectName && parentType != mutationObjectName && ctx.IsBoundary[parentType] {
 		// Otherwise, add an id selection to all boundary types
-		if idDef := parentDef.Fields.ForName("id"); idDef != nil {
-			selectionSetResult = append(selectionSetResult, &ast.Field{Alias: "_bramble_id", Name: "id", Definition: idDef})
+		if idDef := parentDef.Fields.ForName(IdFieldName); idDef != nil {
+			selectionSetResult = append(selectionSetResult, &ast.Field{Alias: "_bramble_id", Name: IdFieldName, Definition: idDef})
 		}
 	}
 	return selectionSetResult, childrenStepsResult, nil
@@ -386,6 +379,8 @@ func (m FieldURLMap) keyFor(parent string, field string) string {
 // BoundaryField contains the name and format for a boundary query
 type BoundaryField struct {
 	Field string
+	// Name of the received id argument
+	Argument string
 	// Whether the query is in the array format
 	Array bool
 }
@@ -394,7 +389,7 @@ type BoundaryField struct {
 type BoundaryFieldsMap map[string]map[string]BoundaryField
 
 // RegisterField registers a boundary field
-func (m BoundaryFieldsMap) RegisterField(serviceURL, typeName, field string, array bool) {
+func (m BoundaryFieldsMap) RegisterField(serviceURL, typeName string, field string, argument string, array bool) {
 	if _, ok := m[serviceURL]; !ok {
 		m[serviceURL] = make(map[string]BoundaryField)
 	}
@@ -405,7 +400,7 @@ func (m BoundaryFieldsMap) RegisterField(serviceURL, typeName, field string, arr
 		return
 	}
 
-	m[serviceURL][typeName] = BoundaryField{Field: field, Array: array}
+	m[serviceURL][typeName] = BoundaryField{Field: field, Argument: argument, Array: array}
 }
 
 // Query returns the boundary field for the given service and type

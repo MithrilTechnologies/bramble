@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -172,13 +173,15 @@ func (q *queryExecution) executeChildStep(step *QueryPlanStep, boundaryIDs []str
 
 	q.writeExecutionResult(step, data, nil)
 
-	if len(data) > 0 {
+	nonNillBoundaryResults := extractNonNilBoundaryResults(data)
+
+	if len(nonNillBoundaryResults) > 0 {
 		for _, childStep := range step.Then {
-			boundaryResultInsertionPoint, err := trimInsertionPointForNestedBoundaryStep(data, childStep.InsertionPoint)
+			boundaryResultInsertionPoint, err := trimInsertionPointForNestedBoundaryStep(nonNillBoundaryResults, childStep.InsertionPoint)
 			if err != nil {
 				return err
 			}
-			boundaryIDs, err := extractAndDedupeBoundaryIDs(data, boundaryResultInsertionPoint)
+			boundaryIDs, err := extractAndDedupeBoundaryIDs(nonNillBoundaryResults, boundaryResultInsertionPoint)
 			if err != nil {
 				return err
 			}
@@ -193,6 +196,18 @@ func (q *queryExecution) executeChildStep(step *QueryPlanStep, boundaryIDs []str
 	}
 
 	return nil
+}
+
+func extractNonNilBoundaryResults(data []interface{}) []interface{} {
+	var nonNilResults []interface{}
+	for _, d := range data {
+		if d != nil {
+			nonNilResults = append(nonNilResults, d)
+		}
+
+	}
+
+	return nonNilResults
 }
 
 func (q *queryExecution) executeBoundaryQuery(documents []string, serviceURL string, boundaryFieldGetter BoundaryField) ([]interface{}, error) {
@@ -427,7 +442,7 @@ func buildBoundaryQueryDocuments(ctx context.Context, schema *ast.Schema, step *
 			qids = append(qids, fmt.Sprintf("%q", id))
 		}
 		idsQL := fmt.Sprintf("[%s]", strings.Join(qids, ", "))
-		return []string{fmt.Sprintf(`{ _result: %s(ids: %s) %s }`, parentTypeBoundaryField.Field, idsQL, selectionSetQL)}, nil
+		return []string{fmt.Sprintf(`{ _result: %s(%s: %s) %s }`, parentTypeBoundaryField.Field, parentTypeBoundaryField.Argument, idsQL, selectionSetQL)}, nil
 	}
 
 	var (
@@ -437,7 +452,7 @@ func buildBoundaryQueryDocuments(ctx context.Context, schema *ast.Schema, step *
 	for _, batch := range batchBy(ids, batchSize) {
 		var selections []string
 		for _, id := range batch {
-			selection := fmt.Sprintf("%s: %s(id: %q) %s", fmt.Sprintf("_%d", selectionIndex), parentTypeBoundaryField.Field, id, selectionSetQL)
+			selection := fmt.Sprintf("%s: %s(%s: %q) %s", fmt.Sprintf("_%d", selectionIndex), parentTypeBoundaryField.Field, parentTypeBoundaryField.Argument, id, selectionSetQL)
 			selections = append(selections, selection)
 			selectionIndex++
 		}
@@ -563,6 +578,9 @@ func mergeExecutionResultsRec(src interface{}, dst interface{}, insertionPoint [
 				return err
 			}
 		}
+	case nil:
+		// The destination is nil, so the src can not be merged
+		return nil
 	default:
 		return fmt.Errorf("mergeExecutionResultsRec: unxpected type '%T' for non top-level merge", ptr)
 	}
@@ -610,11 +628,7 @@ func bubbleUpNullValuesInPlaceRec(schema *ast.Schema, currentType *ast.Type, sel
 	switch result := result.(type) {
 	case map[string]interface{}:
 		objectTypename := extractAndCastTypenameField(result)
-		filteredSelectionSet, unionErr := unionAndTrimSelectionSet(objectTypename, schema, selectionSet)
-		if err != nil {
-			err = unionErr
-			return
-		}
+		filteredSelectionSet := unionAndTrimSelectionSet(objectTypename, schema, selectionSet)
 
 		for _, selection := range filteredSelectionSet {
 			switch selection := selection.(type) {
@@ -714,44 +728,35 @@ func appendPathIndex(path []ast.PathElement, index int) []ast.PathElement {
 	return append(pathCopy, ast.PathIndex(index))
 }
 
-func formatResponseData(schema *ast.Schema, selectionSet ast.SelectionSet, result map[string]interface{}) ([]byte, error) {
+func formatResponseData(schema *ast.Schema, selectionSet ast.SelectionSet, result map[string]interface{}) []byte {
 	return formatResponseDataRec(schema, selectionSet, result, false)
 }
 
-func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, result interface{}, insideFragment bool) ([]byte, error) {
+func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, result interface{}, insideFragment bool) []byte {
 	var buf bytes.Buffer
 	if result == nil {
-		return []byte("null"), nil
+		return []byte("null")
 	}
 	switch result := result.(type) {
 	case map[string]interface{}:
 		if len(result) == 0 {
-			return []byte("null"), nil
+			return []byte("null")
 		}
 		if !insideFragment {
 			buf.WriteString("{")
 		}
 
 		objectTypename := extractAndCastTypenameField(result)
-		filteredSelectionSet, err := unionAndTrimSelectionSet(objectTypename, schema, selectionSet)
-		if err != nil {
-			return []byte{}, err
-		}
+		filteredSelectionSet := unionAndTrimSelectionSet(objectTypename, schema, selectionSet)
 
 		for i, selection := range filteredSelectionSet {
 			switch selection := selection.(type) {
 			case *ast.InlineFragment:
-				innerBody, err := formatResponseDataRec(schema, selection.SelectionSet, result, true)
-				if err != nil {
-					return []byte{}, err
-				}
+				innerBody := formatResponseDataRec(schema, selection.SelectionSet, result, true)
 				buf.Write(innerBody)
 
 			case *ast.FragmentSpread:
-				innerBody, err := formatResponseDataRec(schema, selection.Definition.SelectionSet, result, true)
-				if err != nil {
-					return []byte{}, err
-				}
+				innerBody := formatResponseDataRec(schema, selection.Definition.SelectionSet, result, true)
 				buf.Write(innerBody)
 			case *ast.Field:
 				field := selection
@@ -765,15 +770,14 @@ func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, re
 					continue
 				}
 				if field.SelectionSet != nil && len(field.SelectionSet) > 0 {
-					innerBody, err := formatResponseDataRec(schema, field.SelectionSet, fieldData, false)
-					if err != nil {
-						return []byte{}, err
-					}
+					innerBody := formatResponseDataRec(schema, field.SelectionSet, fieldData, false)
 					buf.Write(innerBody)
 				} else {
 					fieldJSON, err := json.Marshal(&fieldData)
 					if err != nil {
-						return []byte{}, err
+						// We panic here because the data we're working on has already come through
+						// from downstream services as JSON. We should never get to this point with invalid JSON.
+						log.Panicf("invalid json when formatting response: %v", err)
 					}
 
 					buf.Write(fieldJSON)
@@ -789,10 +793,7 @@ func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, re
 	case []interface{}:
 		buf.WriteString("[")
 		for i, v := range result {
-			innerBody, err := formatResponseDataRec(schema, selectionSet, v, false)
-			if err != nil {
-				return []byte{}, err
-			}
+			innerBody := formatResponseDataRec(schema, selectionSet, v, false)
 			buf.Write(innerBody)
 
 			if i < len(result)-1 {
@@ -803,10 +804,7 @@ func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, re
 	case []map[string]interface{}:
 		buf.WriteString("[")
 		for i, v := range result {
-			innerBody, err := formatResponseDataRec(schema, selectionSet, v, false)
-			if err != nil {
-				return []byte{}, err
-			}
+			innerBody := formatResponseDataRec(schema, selectionSet, v, false)
 			buf.Write(innerBody)
 
 			if i < len(result)-1 {
@@ -816,7 +814,7 @@ func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, re
 		buf.WriteString("]")
 	}
 
-	return buf.Bytes(), nil
+	return buf.Bytes()
 }
 
 // When formatting the response data, the shape of the selection set has to potentially be modified to more closely resemble the shape
@@ -824,11 +822,11 @@ func formatResponseDataRec(schema *ast.Schema, selectionSet ast.SelectionSet, re
 //   1. the selection set of the target fragment has to be unioned with the selection set at the level for which the target fragment is referenced
 //   2. if the target fragments are an implementation of an abstract type, we need to use the __typename from the response body to check which
 //   implementation was resolved. Any fragments that do not match are dropped from the selection set.
-func unionAndTrimSelectionSet(objectTypename string, schema *ast.Schema, selectionSet ast.SelectionSet) (ast.SelectionSet, error) {
+func unionAndTrimSelectionSet(objectTypename string, schema *ast.Schema, selectionSet ast.SelectionSet) ast.SelectionSet {
 	return unionAndTrimSelectionSetRec(objectTypename, schema, selectionSet, map[string]*ast.Field{})
 }
 
-func unionAndTrimSelectionSetRec(objectTypename string, schema *ast.Schema, selectionSet ast.SelectionSet, seenFields map[string]*ast.Field) (ast.SelectionSet, error) {
+func unionAndTrimSelectionSetRec(objectTypename string, schema *ast.Schema, selectionSet ast.SelectionSet, seenFields map[string]*ast.Field) ast.SelectionSet {
 	var filteredSelectionSet ast.SelectionSet
 	for _, selection := range selectionSet {
 		switch selection := selection.(type) {
@@ -849,10 +847,7 @@ func unionAndTrimSelectionSetRec(objectTypename string, schema *ast.Schema, sele
 				continue
 			}
 
-			filteredSelections, err := unionAndTrimSelectionSetRec(objectTypename, schema, fragment.SelectionSet, seenFields)
-			if err != nil {
-				return nil, err
-			}
+			filteredSelections := unionAndTrimSelectionSetRec(objectTypename, schema, fragment.SelectionSet, seenFields)
 			if len(filteredSelections) > 0 {
 				fragment.SelectionSet = filteredSelections
 				filteredSelectionSet = append(filteredSelectionSet, selection)
@@ -862,7 +857,7 @@ func unionAndTrimSelectionSetRec(objectTypename string, schema *ast.Schema, sele
 		}
 	}
 
-	return filteredSelectionSet, nil
+	return filteredSelectionSet
 }
 
 func extractAndCastTypenameField(result map[string]interface{}) string {

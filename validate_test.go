@@ -636,7 +636,7 @@ func TestSchemaValidateBoundaryFields(t *testing.T) {
 		type Query {
 			foo(ids: [ID!]): [Foo!] @boundary
 		}
-		`).assertInvalid(`invalid boundary query "foo": boundary query must have a single "id: ID!" or list "ids: [ID!]!" argument`, validateBoundaryQueries)
+		`).assertInvalid(`invalid boundary query "foo": boundary list query must accept an argument of type "[ID!]!"`, validateBoundaryQueries)
 	})
 
 	t.Run("non-nullable boundary query result", func(t *testing.T) {
@@ -670,6 +670,34 @@ func TestSchemaValidateBoundaryFields(t *testing.T) {
 			severalFoos(ids: [ID!]!): [Foo]! @boundary
 		}
 		`).assertInvalid(`declared duplicate query for boundary type "Foo"`, validateBoundaryFields)
+	})
+
+	t.Run("requires at least one argument", func(t *testing.T) {
+		withSchema(t, `
+		directive @boundary on OBJECT | FIELD_DEFINITION
+
+		type Foo @boundary {
+			id: ID!
+		}
+
+		type Query {
+			foo: Foo @boundary
+		}
+		`).assertInvalid(`boundary field "foo" expects exactly one argument`, validateBoundaryFields)
+	})
+
+	t.Run("requires exactly one argument", func(t *testing.T) {
+		withSchema(t, `
+		directive @boundary on OBJECT | FIELD_DEFINITION
+
+		type Foo @boundary {
+			id: ID!
+		}
+
+		type Query {
+			foo(id: ID!, scope: String): Foo @boundary
+		}
+		`).assertInvalid(`boundary field "foo" expects exactly one argument`, validateBoundaryFields)
 	})
 }
 

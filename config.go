@@ -3,6 +3,7 @@ package bramble
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,7 @@ type PluginConfig struct {
 
 // Config contains the gateway configuration
 type Config struct {
+	IdFieldName            string    `json:"id-field-name"`
 	GatewayListenAddress   string    `json:"gateway-address"`
 	MetricsListenAddress   string    `json:"metrics-address"`
 	PrivateListenAddress   string    `json:"private-address"`
@@ -37,6 +39,8 @@ type Config struct {
 	Plugins                []PluginConfig
 	// Config extensions that can be shared among plugins
 	Extensions map[string]json.RawMessage
+	// HTTP client to customize for downstream services query
+	QueryHTTPClient *http.Client
 
 	plugins          []Plugin
 	executableSchema *ExecutableSchema
@@ -92,6 +96,10 @@ func (c *Config) Load() error {
 		plugins = append(plugins, c.Plugins...)
 	}
 	c.Plugins = plugins
+
+	if strings.TrimSpace(c.IdFieldName) != "" {
+		IdFieldName = c.IdFieldName
+	}
 
 	logLevel := os.Getenv("BRAMBLE_LOG_LEVEL")
 	if level, err := log.ParseLevel(logLevel); err == nil {
@@ -214,7 +222,7 @@ func GetConfig(configFiles []string) (*Config, error) {
 		PrivatePort:            8083,
 		MetricsPort:            9009,
 		LogLevel:               log.DebugLevel,
-		PollInterval:           "5s",
+		PollInterval:           "10s",
 		MaxRequestsPerQuery:    50,
 		MaxServiceResponseSize: 1024 * 1024,
 
@@ -259,8 +267,12 @@ func (c *Config) Init() error {
 		services = append(services, NewService(s))
 	}
 
-	queryClient := NewClient(WithMaxResponseSize(c.MaxServiceResponseSize), WithUserAgent(GenerateUserAgent("query")))
-	es := newExecutableSchema(c.plugins, c.MaxRequestsPerQuery, queryClient, services...)
+	queryClientOptions := []ClientOpt{WithMaxResponseSize(c.MaxServiceResponseSize), WithUserAgent(GenerateUserAgent("query"))}
+	if c.QueryHTTPClient != nil {
+		queryClientOptions = append(queryClientOptions, WithHTTPClient(c.QueryHTTPClient))
+	}
+	queryClient := NewClient(queryClientOptions...)
+	es := NewExecutableSchema(c.plugins, c.MaxRequestsPerQuery, queryClient, services...)
 	err = es.UpdateSchema(true)
 	if err != nil {
 		return err

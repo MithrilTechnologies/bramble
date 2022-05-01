@@ -9,8 +9,10 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/stretchr/testify/assert"
@@ -20,6 +22,40 @@ import (
 	"github.com/vektah/gqlparser/v2/formatter"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 )
+
+func TestHonorsPermissions(t *testing.T) {
+	schema := `
+	type Cinema {
+		id: ID!
+		name: String!
+	}
+
+	type Query {
+		cinema(id: ID!): Cinema!
+	}`
+
+	mergedSchema, err := MergeSchemas(gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: schema}))
+	require.NoError(t, err)
+
+	es := ExecutableSchema{
+		MergedSchema: mergedSchema,
+	}
+
+	query := gqlparser.MustLoadQuery(es.MergedSchema, `{
+		cinema(id: "Cinema") {
+			name
+		}
+	}`)
+	ctx := testContextWithNoPermissions(query.Operations[0])
+	resp := es.ExecuteQuery(ctx)
+
+	permissionsError := &gqlerror.Error{
+		Message: "user do not have permission to access field query.cinema",
+	}
+
+	require.Contains(t, resp.Errors, permissionsError)
+	require.Nil(t, resp.Data)
+}
 
 func TestIntrospectionQuery(t *testing.T) {
 	schema := `
@@ -308,6 +344,31 @@ func TestIntrospectionQuery(t *testing.T) {
 				]
 			}
 			}
+		`, string(resp.Data))
+	})
+
+	t.Run("interface", func(t *testing.T) {
+		query := gqlparser.MustLoadQuery(es.MergedSchema, `
+		{
+			__type(name: "Person") {
+				possibleTypes {
+					name
+				}
+			}
+		}
+		`)
+		ctx := testContextWithoutVariables(query.Operations[0])
+		resp := es.ExecuteQuery(ctx)
+		require.JSONEq(t, `
+		{
+			"__type": {
+				"possibleTypes": [
+				{
+					"name": "Cast"
+				}
+				]
+			}
+		}
 		`, string(resp.Data))
 	})
 
@@ -995,6 +1056,96 @@ func TestQueryExecutionMultipleServices(t *testing.T) {
 	f.checkSuccess(t)
 }
 
+func TestQueryExecutionServiceTimeout(t *testing.T) {
+	f := &queryExecutionFixture{
+		services: []testService{
+			{
+				schema: `directive @boundary on OBJECT
+				type Movie @boundary {
+					id: ID!
+					title: String
+				}
+
+				type Query {
+					movie(id: ID!): Movie!
+				}`,
+				handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Write([]byte(`{
+						"data": {
+							"movie": {
+								"_bramble_id": "1",
+								"id": "1",
+								"title": "Test title"
+							}
+						}
+					}
+					`))
+				}),
+			},
+			{
+				schema: `directive @boundary on OBJECT | FIELD_DEFINITION
+				type Movie @boundary {
+					id: ID!
+					release: Int
+					slowField: String
+				}
+
+				type Query {
+					movie(id: ID!): Movie! @boundary
+				}`,
+				handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+
+					time.Sleep(300 * time.Millisecond)
+
+					response := jsonToInterfaceMap(`{
+						"data": {
+							"_0": {
+								"_bramble_id": "1",
+								"id": "1",
+								"release": 2007,
+								"slowField": "very slow field"
+							}
+						}
+					}
+					`)
+					if err := json.NewEncoder(w).Encode(response); err != nil {
+						t.Errorf("Unexpected error %s", err)
+					}
+				}),
+			},
+		},
+		query: `{
+			movie(id: "1") {
+				id
+				title
+				slowField
+			}
+		}`,
+		expected: `{
+			"movie": {
+				"id": "1",
+				"title": "Test title",
+				"slowField": null
+			}
+		}`,
+		errors: gqlerror.List{
+			&gqlerror.Error{
+				Message: `error during request: Post \"http://127.0.0.1:\d{5}\": context deadline exceeded`,
+				Path:    ast.Path{ast.PathName("movie")},
+				Locations: []gqlerror.Location{
+					{Line: 5, Column: 5},
+				},
+				Extensions: map[string]interface{}{
+					"selectionSet": "{ slowField _bramble_id: id }",
+				},
+			},
+		},
+	}
+
+	f.run(t)
+	jsonEqWithOrder(t, f.expected, string(f.resp.Data))
+}
+
 func TestQueryExecutionNamespaceAndFragmentSpread(t *testing.T) {
 	f := &queryExecutionFixture{
 		services: []testService{
@@ -1479,6 +1630,239 @@ func TestTrimInsertionPointForNestedBoundaryQuery(t *testing.T) {
 	require.Equal(t, expected, result)
 }
 
+func TestNestingNullableBoundaryTypes(t *testing.T) {
+	t.Run("nested boundary types are all null", func(t *testing.T) {
+		f := &queryExecutionFixture{
+			services: []testService{
+				{
+					schema: `directive @boundary on OBJECT | FIELD_DEFINITION
+						type Gizmo @boundary {
+							id: ID!
+						}
+						type Query {
+							tastyGizmos: [Gizmo!]!
+							gizmo(ids: [ID!]!): [Gizmo]! @boundary
+						}`,
+					handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Write([]byte(`
+							{
+								"data": {
+									"tastyGizmos": [
+										{
+											"_bramble_id": "beehasknees",
+											"id": "beehasknees"
+										},
+										{
+											"_bramble_id": "umlaut",
+											"id": "umlaut"
+										},
+										{
+											"_bramble_id": "probanana",
+											"id": "probanana"
+										}
+									]
+								}
+							}
+						`))
+					}),
+				},
+				{
+					schema: `directive @boundary on OBJECT | FIELD_DEFINITION
+						type Gizmo @boundary {
+							id: ID!
+							wizzle: Wizzle
+						}
+						type Wizzle @boundary {
+							id: ID!
+						}
+						type Query {
+							wizzles(ids: [ID!]): [Wizzle]! @boundary
+							gizmo(ids: [ID!]): [Gizmo]! @boundary
+						}`,
+					handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Write([]byte(`{
+						"data": {
+							"_result": [null, null, null]
+						}
+					}`))
+					}),
+				},
+				{
+					schema: `directive @boundary on OBJECT | FIELD_DEFINITION
+						type Wizzle @boundary {
+							id: ID!
+							bazingaFactor: Int
+						}
+						type Query {
+							wizzles(ids: [ID!]): [Wizzle]! @boundary
+						}`,
+					handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Write([]byte(`should not be called...`))
+					}),
+				},
+			},
+
+			query: `{
+				tastyGizmos {
+					id
+					wizzle {
+						id
+						bazingaFactor
+					}
+				}
+			}`,
+			expected: `{
+				"tastyGizmos": [
+					{
+						"id": "beehasknees",
+						"wizzle": null
+					},
+					{
+						"id": "umlaut",
+						"wizzle": null
+					},
+					{
+						"id": "probanana",
+						"wizzle": null
+					}
+				]
+			}`,
+		}
+
+		f.checkSuccess(t)
+	})
+
+	t.Run("nested boundary types sometimes null", func(t *testing.T) {
+		f := &queryExecutionFixture{
+			services: []testService{
+				{
+					schema: `directive @boundary on OBJECT | FIELD_DEFINITION
+						type Gizmo @boundary {
+							id: ID!
+						}
+						type Query {
+							tastyGizmos: [Gizmo!]!
+							gizmo(ids: [ID!]!): [Gizmo]! @boundary
+						}`,
+					handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Write([]byte(`
+							{
+								"data": {
+									"tastyGizmos": [
+										{
+											"_bramble_id": "beehasknees",
+											"id": "beehasknees"
+										},
+										{
+											"_bramble_id": "umlaut",
+											"id": "umlaut"
+										},
+										{
+											"_bramble_id": "probanana",
+											"id": "probanana"
+										}
+									]
+								}
+							}
+						`))
+					}),
+				},
+				{
+					schema: `directive @boundary on OBJECT | FIELD_DEFINITION
+						type Gizmo @boundary {
+							id: ID!
+							wizzle: Wizzle
+						}
+						type Wizzle @boundary {
+							id: ID!
+						}
+						type Query {
+							wizzles(ids: [ID!]): [Wizzle]! @boundary
+							gizmos(ids: [ID!]): [Gizmo]! @boundary
+						}`,
+					handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Write([]byte(`{
+						"data": {
+							"_result": [
+								null,
+								{
+									"_bramble_id": "umlaut",
+									"id": "umlaut",
+									"wizzle": null
+								},
+								{
+									"_bramble_id": "probanana",
+									"id": "probanana",
+									"wizzle": {
+										"_bramble_id": "bananawizzle",
+										"id": "bananawizzle"
+									}
+								}
+							]
+						}
+					}`))
+					}),
+				},
+				{
+					schema: `directive @boundary on OBJECT | FIELD_DEFINITION
+						type Wizzle @boundary {
+							id: ID!
+							bazingaFactor: Int
+						}
+						type Query {
+							wizzles(ids: [ID!]): [Wizzle]! @boundary
+						}`,
+					handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						w.Write([]byte(`{
+						"data": {
+							"_result": [
+								{
+									"_bramble_id": "bananawizzle",
+									"id": "bananawizzle",
+									"bazingaFactor": 4
+								}
+							]
+						}
+					}`))
+					}),
+				},
+			},
+
+			query: `{
+				tastyGizmos {
+					id
+					wizzle {
+						id
+						bazingaFactor
+					}
+				}
+			}`,
+			expected: `{
+				"tastyGizmos": [
+					{
+						"id": "beehasknees",
+						"wizzle": null
+					},
+					{
+						"id": "umlaut",
+						"wizzle": null
+					},
+					{
+						"id": "probanana",
+						"wizzle": {
+							"id": "bananawizzle",
+							"bazingaFactor": 4
+						}
+					}
+				]
+			}`,
+		}
+
+		f.checkSuccess(t)
+	})
+
+}
+
 func TestBuildBoundaryQueryDocuments(t *testing.T) {
 	ddl := `
 		type Gizmo {
@@ -1498,7 +1882,7 @@ func TestBuildBoundaryQueryDocuments(t *testing.T) {
 		}
 	`
 	schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-	boundaryField := BoundaryField{Field: "getOwners", Array: true}
+	boundaryField := BoundaryField{Field: "getOwners", Argument: "ids", Array: true}
 	ids := []string{"1", "2", "3"}
 	selectionSet := []ast.Selection{
 		&ast.Field{
@@ -1548,7 +1932,7 @@ func TestBuildNonArrayBoundaryQueryDocuments(t *testing.T) {
 		}
 	`
 	schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-	boundaryField := BoundaryField{Field: "getOwner", Array: false}
+	boundaryField := BoundaryField{Field: "getOwner", Argument: "id", Array: false}
 	ids := []string{"1", "2", "3"}
 	selectionSet := []ast.Selection{
 		&ast.Field{
@@ -1598,7 +1982,7 @@ func TestBuildBatchedNonArrayBoundaryQueryDocuments(t *testing.T) {
 		}
 	`
 	schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-	boundaryField := BoundaryField{Field: "getOwner", Array: false}
+	boundaryField := BoundaryField{Field: "getOwner", Argument: "id", Array: false}
 	ids := []string{"1", "2", "3"}
 	selectionSet := []ast.Selection{
 		&ast.Field{
@@ -2142,6 +2526,72 @@ func TestMergeExecutionResults(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, expected, mergedMap)
 	})
+
+	t.Run("merges with nil destination", func(t *testing.T) {
+		inputMapA := jsonToInterfaceMap(`{
+			"gizmo": {
+				"_bramble_id": "1",
+				"gadgets": [
+					[
+						{"_bramble_id": "GADGET1", "details": { "owner": {"_bramble_id": "OWNER1" }}}
+					],
+					[
+						{"_bramble_id": "GADGET2", "details": null}
+					]
+				]
+			}
+		}`)
+
+		resultA := executionResult{
+			ServiceURL:     "http://service-a",
+			InsertionPoint: []string{},
+			Data:           inputMapA,
+		}
+
+		inputMapB := jsonToInterfaceSlice(`[
+			{
+				"_bramble_id": "OWNER1",
+				"name": "Alice"
+			}
+		]`)
+
+		resultB := executionResult{
+			ServiceURL:     "http://service-b",
+			InsertionPoint: []string{"gizmo", "gadgets", "details", "owner"},
+			Data:           inputMapB,
+		}
+
+		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
+
+		expected := jsonToInterfaceMap(`
+		{
+			"gizmo": {
+				"gadgets": [
+					[
+						{
+							"_bramble_id": "GADGET1",
+							"details": {
+								"owner": {
+									"_bramble_id": "OWNER1",
+									"name": "Alice"
+								}
+							}
+						}
+					],
+					[
+						{
+							"_bramble_id": "GADGET2",
+							"details": null
+						}
+					]
+				],
+				"_bramble_id": "1"
+			}
+		}`)
+
+		require.NoError(t, err)
+		require.Equal(t, expected, mergedMap)
+	})
 }
 
 func TestUnionAndTrimSelectionSet(t *testing.T) {
@@ -2228,8 +2678,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("", schema, selectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("", schema, selectionSet)
 		require.Equal(t, selectionSet, filtered)
 	})
 
@@ -2277,8 +2726,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("", schema, selectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("", schema, selectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, filtered), "{ name country { id name } }")
 	})
 
@@ -2365,8 +2813,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 
@@ -2419,8 +2866,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 
@@ -2485,8 +2931,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 
@@ -2533,8 +2978,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("Gadget", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("Gadget", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 }
@@ -3116,8 +3560,7 @@ func TestFormatResponseBody(t *testing.T) {
 			}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3173,8 +3616,7 @@ func TestFormatResponseBody(t *testing.T) {
 			}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3229,8 +3671,7 @@ func TestFormatResponseBody(t *testing.T) {
 			}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3307,8 +3748,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3374,8 +3814,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3450,8 +3889,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3528,8 +3966,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 }
@@ -5374,11 +5811,14 @@ func (f *queryExecutionFixture) setup(t *testing.T) (*ExecutableSchema, func()) 
 
 	f.mergedSchema = merged
 
-	es := newExecutableSchema(nil, 50, nil, services...)
+	es := NewExecutableSchema(nil, 50, nil, services...)
 	es.MergedSchema = merged
 	es.BoundaryQueries = buildBoundaryFieldsMap(services...)
 	es.Locations = buildFieldURLMap(services...)
 	es.IsBoundary = buildIsBoundaryMap(services...)
+	if t.Name() == "TestQueryExecutionServiceTimeout" {
+		es.GraphqlClient.HTTPClient.Timeout = 200 * time.Millisecond
+	}
 
 	return es, func() {
 		for _, close := range serverCloses {
@@ -5409,6 +5849,10 @@ func (f *queryExecutionFixture) run(t *testing.T) {
 		require.Equal(t, len(f.errors), len(f.resp.Errors))
 		for i := range f.errors {
 			delete(f.resp.Errors[i].Extensions, "serviceUrl")
+			// Allow regular expressions in expected error messages
+			if r, err := regexp.Compile(f.errors[i].Message); err == nil && r.Match([]byte(f.resp.Errors.Error())) {
+				f.errors[i].Message = f.resp.Errors[i].Message
+			}
 			require.Equal(t, *f.errors[i], *f.resp.Errors[i])
 		}
 	}
@@ -5483,6 +5927,17 @@ func testContextWithoutVariables(op *ast.OperationDefinition) context.Context {
 		AllowedRootQueryFields:        AllowedFields{AllowAll: true},
 		AllowedRootMutationFields:     AllowedFields{AllowAll: true},
 		AllowedRootSubscriptionFields: AllowedFields{AllowAll: true},
+	})
+}
+
+func testContextWithNoPermissions(op *ast.OperationDefinition) context.Context {
+	return AddPermissionsToContext(graphql.WithOperationContext(context.Background(), &graphql.OperationContext{
+		Variables: map[string]interface{}{},
+		Operation: op,
+	}), OperationPermissions{
+		AllowedRootQueryFields:        AllowedFields{},
+		AllowedRootMutationFields:     AllowedFields{},
+		AllowedRootSubscriptionFields: AllowedFields{},
 	})
 }
 

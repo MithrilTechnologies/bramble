@@ -805,8 +805,8 @@ func TestQueryPlanWithNestedNamespaces(t *testing.T) {
 
 func TestPrefersArrayBasedBoundaryLookups(t *testing.T) {
 	boundaryFieldMap := make(BoundaryFieldsMap)
-	boundaryFieldMap.RegisterField("service-a", "movie", "_movie", true)
-	boundaryFieldMap.RegisterField("service-a", "movie", "_movies", false)
+	boundaryFieldMap.RegisterField("service-a", "movie", "_movie", "id", true)
+	boundaryFieldMap.RegisterField("service-a", "movie", "_movies", "ids", false)
 
 	boundaryField, err := boundaryFieldMap.Field("service-a", "movie")
 	require.NoError(t, err)
@@ -835,4 +835,20 @@ func TestQueryPlanValidateReservedIdAlias(t *testing.T) {
 
 func TestQueryPlanValidateReservedTypenameAlias(t *testing.T) {
 	PlanTestFixture1.CheckError(t, "{ movies { _bramble__typename: title } }")
+}
+
+func TestExtractSelectionSetNilParentDefinition(t *testing.T) {
+	query := `
+	query {
+		animals {
+			... on Dog {
+				name
+				breed {
+					name
+					origin
+				}
+			}
+		}
+	}`
+	PlanTestFixture7.CheckNilPointer(t, query)
 }
