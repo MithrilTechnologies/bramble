@@ -23,6 +23,40 @@ import (
 	"github.com/vektah/gqlparser/v2/gqlerror"
 )
 
+func TestHonorsPermissions(t *testing.T) {
+	schema := `
+	type Cinema {
+		id: ID!
+		name: String!
+	}
+
+	type Query {
+		cinema(id: ID!): Cinema!
+	}`
+
+	mergedSchema, err := MergeSchemas(gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: schema}))
+	require.NoError(t, err)
+
+	es := ExecutableSchema{
+		MergedSchema: mergedSchema,
+	}
+
+	query := gqlparser.MustLoadQuery(es.MergedSchema, `{
+		cinema(id: "Cinema") {
+			name
+		}
+	}`)
+	ctx := testContextWithNoPermissions(query.Operations[0])
+	resp := es.ExecuteQuery(ctx)
+
+	permissionsError := &gqlerror.Error{
+		Message: "user do not have permission to access field query.cinema",
+	}
+
+	require.Contains(t, resp.Errors, permissionsError)
+	require.Nil(t, resp.Data)
+}
+
 func TestIntrospectionQuery(t *testing.T) {
 	schema := `
 	union MovieOrCinema = Movie | Cinema
@@ -310,6 +344,31 @@ func TestIntrospectionQuery(t *testing.T) {
 				]
 			}
 			}
+		`, string(resp.Data))
+	})
+
+	t.Run("interface", func(t *testing.T) {
+		query := gqlparser.MustLoadQuery(es.MergedSchema, `
+		{
+			__type(name: "Person") {
+				possibleTypes {
+					name
+				}
+			}
+		}
+		`)
+		ctx := testContextWithoutVariables(query.Operations[0])
+		resp := es.ExecuteQuery(ctx)
+		require.JSONEq(t, `
+		{
+			"__type": {
+				"possibleTypes": [
+				{
+					"name": "Cast"
+				}
+				]
+			}
+		}
 		`, string(resp.Data))
 	})
 
@@ -903,6 +962,59 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 				  	}
 				}
 				... GadgetFragment
+			}`,
+			expected: `
+			{
+				"snapshot": {
+					"id": "100",
+					"name": "foo",
+					"gadgets": [
+						{
+							"id": "GADGET1",
+							"name": "Gadget #1",
+							"agents": [
+								{"name": "James Bond", "country": "UK"}
+							]
+						}
+					]
+				}
+			}`,
+		}
+
+		f.checkSuccess(t)
+	})
+
+	t.Run("with multiple top level fragment spreads (gadget implementation)", func(t *testing.T) {
+		f := &queryExecutionFixture{
+			services: []testService{serviceA, serviceB},
+			query: `
+			query Foo {
+				snapshot(id: "GADGET1") {
+					id
+					name
+					... GadgetFragment
+					... GizmoFragment
+				}
+			}
+
+			fragment GadgetFragment on GadgetImplementation {
+				gadgets {
+					id
+					name
+					agents {
+						name
+						... on Agent {
+							country
+						}
+					}
+				}
+			}
+
+			fragment GizmoFragment on GizmoImplementation {
+				gizmos {
+					id
+					name
+				}
 			}`,
 			expected: `
 			{
@@ -2619,8 +2731,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("", schema, selectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("", schema, selectionSet)
 		require.Equal(t, selectionSet, filtered)
 	})
 
@@ -2668,8 +2779,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("", schema, selectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("", schema, selectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, filtered), "{ name country { id name } }")
 	})
 
@@ -2756,8 +2866,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 
@@ -2810,8 +2919,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 
@@ -2876,8 +2984,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 
@@ -2924,8 +3031,7 @@ func TestUnionAndTrimSelectionSet(t *testing.T) {
 			},
 		}
 
-		filtered, err := unionAndTrimSelectionSet("Gadget", schema, initialSelectionSet)
-		require.NoError(t, err)
+		filtered := unionAndTrimSelectionSet("Gadget", schema, initialSelectionSet)
 		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
 	})
 }
@@ -3507,8 +3613,7 @@ func TestFormatResponseBody(t *testing.T) {
 			}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3564,8 +3669,7 @@ func TestFormatResponseBody(t *testing.T) {
 			}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3620,8 +3724,7 @@ func TestFormatResponseBody(t *testing.T) {
 			}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3698,8 +3801,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3765,8 +3867,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3841,8 +3942,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 
@@ -3919,8 +4019,7 @@ func TestFormatResponseBody(t *testing.T) {
 		}`
 
 		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON, err := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
+		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
 		require.JSONEq(t, expectedJSON, string(bodyJSON))
 	})
 }
@@ -5881,6 +5980,17 @@ func testContextWithoutVariables(op *ast.OperationDefinition) context.Context {
 		AllowedRootQueryFields:        AllowedFields{AllowAll: true},
 		AllowedRootMutationFields:     AllowedFields{AllowAll: true},
 		AllowedRootSubscriptionFields: AllowedFields{AllowAll: true},
+	})
+}
+
+func testContextWithNoPermissions(op *ast.OperationDefinition) context.Context {
+	return AddPermissionsToContext(graphql.WithOperationContext(context.Background(), &graphql.OperationContext{
+		Variables: map[string]interface{}{},
+		Operation: op,
+	}), OperationPermissions{
+		AllowedRootQueryFields:        AllowedFields{},
+		AllowedRootMutationFields:     AllowedFields{},
+		AllowedRootSubscriptionFields: AllowedFields{},
 	})
 }
 
