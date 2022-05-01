@@ -25,7 +25,6 @@ type Plugin interface {
 	GraphqlQueryPath() (bool, string)
 	ApplyMiddlewarePublicMux(http.Handler) http.Handler
 	ApplyMiddlewarePrivateMux(http.Handler) http.Handler
-	ModifyExtensions(ctx context.Context, e *queryExecution, extensions map[string]interface{}) error
 	ResponseHeaders(headers http.Header)
 }
 

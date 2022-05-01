@@ -215,9 +215,6 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 
 	for _, plugin := range s.plugins {
 		plugin.ResponseHeaders(headers)
-		if err := plugin.ModifyExtensions(ctx, qe, extensions); err != nil {
-			AddField(ctx, fmt.Sprintf("%s-plugin-error", plugin.ID()), err.Error())
-		}
 	}
 
 	introspectionData := resolveIntrospectionFields(ctx, operation.SelectionSet, filteredSchema)
