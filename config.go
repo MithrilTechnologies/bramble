@@ -25,6 +25,7 @@ type PluginConfig struct {
 type Config struct {
 	IdFieldName            string    `json:"id-field-name"`
 	GatewayListenAddress   string    `json:"gateway-address"`
+	DisableIntrospection   bool      `json:"disable-introspection"`
 	MetricsListenAddress   string    `json:"metrics-address"`
 	PrivateListenAddress   string    `json:"private-address"`
 	GatewayPort            int       `json:"gateway-port"`
@@ -271,7 +272,7 @@ func (c *Config) Init() error {
 	if c.QueryHTTPClient != nil {
 		queryClientOptions = append(queryClientOptions, WithHTTPClient(c.QueryHTTPClient))
 	}
-	queryClient := NewClient(queryClientOptions...)
+	queryClient := NewClientWithPlugins(c.plugins, queryClientOptions...)
 	es := NewExecutableSchema(c.plugins, c.MaxRequestsPerQuery, queryClient, services...)
 	err = es.UpdateSchema(true)
 	if err != nil {

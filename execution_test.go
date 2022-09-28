@@ -57,456 +57,6 @@ func TestHonorsPermissions(t *testing.T) {
 	require.Nil(t, resp.Data)
 }
 
-func TestIntrospectionQuery(t *testing.T) {
-	schema := `
-	union MovieOrCinema = Movie | Cinema
-	interface Person { name: String! }
-
-	type Cast implements Person {
-		name: String!
-	}
-
-	"""
-	A bit like a film
-	"""
-	type Movie {
-		id: ID!
-		title: String @deprecated(reason: "Use something else")
-		genres: [MovieGenre!]!
-	}
-
-	enum MovieGenre {
-		ACTION
-		COMEDY
-		HORROR @deprecated(reason: "too scary")
-		DRAMA
-		ANIMATION
-		ADVENTURE
-		SCIENCE_FICTION
-	}
-
-	type Cinema {
-		id: ID!
-		name: String!
-	}
-
-	type Query {
-		movie(id: ID!): Movie!
-		movies: [Movie!]!
-		somethingRandom: MovieOrCinema
-		somePerson: Person
-	}`
-
-	// Make sure schema merging doesn't break introspection
-	mergedSchema, err := MergeSchemas(gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: schema}))
-	require.NoError(t, err)
-
-	es := ExecutableSchema{
-		MergedSchema: mergedSchema,
-	}
-
-	t.Run("basic type fields", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `{
-			__type(name: "Movie") {
-				kind
-				name
-				description
-			}
-		}`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-
-		require.JSONEq(t, `
-		{
-			"__type": {
-				"description": "A bit like a film",
-				"kind": "OBJECT",
-				"name": "Movie"
-			}
-		}
-		`, string(resp.Data))
-	})
-
-	t.Run("basic aliased type fields", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `{
-			movie: __type(name: "Movie") {
-				type: kind
-				n: name
-				desc: description
-			}
-		}`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-
-		require.JSONEq(t, `
-		{
-			"movie": {
-				"desc": "A bit like a film",
-				"type": "OBJECT",
-				"n": "Movie"
-			}
-		}
-		`, string(resp.Data))
-	})
-
-	t.Run("lists and non-nulls", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `{
-		__type(name: "Movie") {
-			fields(includeDeprecated: true) {
-				name
-				isDeprecated
-				deprecationReason
-				type {
-					name
-					kind
-					ofType {
-						name
-						kind
-						ofType {
-							name
-							kind
-							ofType {
-								name
-							}
-						}
-					}
-				}
-			}
-		}
-	}`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-		require.JSONEq(t, `
-		{
-			"__type": {
-				"fields": [
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "id",
-					"type": {
-					"kind": "NON_NULL",
-					"name": null,
-					"ofType": {
-						"kind": "SCALAR",
-						"name": "ID",
-						"ofType": null
-					}
-					}
-				},
-				{
-					"deprecationReason": "Use something else",
-					"isDeprecated": true,
-					"name": "title",
-					"type": {
-					"kind": "SCALAR",
-					"name": "String",
-					"ofType": null
-					}
-				},
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "genres",
-					"type": {
-					"kind": "NON_NULL",
-					"name": null,
-					"ofType": {
-						"kind": "LIST",
-						"name": null,
-						"ofType": {
-						"kind": "NON_NULL",
-						"name": null,
-						"ofType": {
-							"name": "MovieGenre"
-						}
-						}
-					}
-					}
-				}
-				]
-			}
-			}
-	`, string(resp.Data))
-	})
-
-	t.Run("fragment", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `
-		query {
-			__type(name: "Movie") {
-				...TypeInfo
-			}
-		}
-
-		fragment TypeInfo on __Type {
-			description
-			kind
-			name
-		}
-		`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-		errsJSON, err := json.Marshal(resp.Errors)
-		require.NoError(t, err)
-		require.Nil(t, resp.Errors, fmt.Sprintf("errors: %s", errsJSON))
-		require.JSONEq(t, `
-		{
-			"__type": {
-				"description": "A bit like a film",
-				"kind": "OBJECT",
-				"name": "Movie"
-			}
-		}
-		`, string(resp.Data))
-	})
-
-	t.Run("enum", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `
-		{
-			__type(name: "MovieGenre") {
-				enumValues(includeDeprecated: true) {
-					name
-					isDeprecated
-					deprecationReason
-				}
-			}
-		}
-		`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-		require.JSONEq(t, `
-		{
-			"__type": {
-				"enumValues": [
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "ACTION"
-				},
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "COMEDY"
-				},
-				{
-					"deprecationReason": "too scary",
-					"isDeprecated": true,
-					"name": "HORROR"
-				},
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "DRAMA"
-				},
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "ANIMATION"
-				},
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "ADVENTURE"
-				},
-				{
-					"deprecationReason": null,
-					"isDeprecated": false,
-					"name": "SCIENCE_FICTION"
-				}
-				]
-			}
-			}
-		`, string(resp.Data))
-	})
-
-	t.Run("union", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `
-		{
-			__type(name: "MovieOrCinema") {
-				possibleTypes {
-					name
-				}
-			}
-		}
-		`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-		require.JSONEq(t, `
-		{
-			"__type": {
-				"possibleTypes": [
-				{
-					"name": "Movie"
-				},
-				{
-					"name": "Cinema"
-				}
-				]
-			}
-			}
-		`, string(resp.Data))
-	})
-
-	t.Run("interface", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `
-		{
-			__type(name: "Person") {
-				possibleTypes {
-					name
-				}
-			}
-		}
-		`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-		require.JSONEq(t, `
-		{
-			"__type": {
-				"possibleTypes": [
-				{
-					"name": "Cast"
-				}
-				]
-			}
-		}
-		`, string(resp.Data))
-	})
-
-	t.Run("type referenced only through an interface", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `{
-			__type(name: "Cast") {
-				kind
-				name
-			}
-		}`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-
-		require.JSONEq(t, `
-		{
-			"__type": {
-				"kind": "OBJECT",
-				"name": "Cast"
-			}
-		}
-		`, string(resp.Data))
-	})
-
-	t.Run("directive", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `
-		{
-			__schema {
-				directives {
-					name
-					args {
-						name
-						type {
-							name
-						}
-					}
-				}
-			}
-		}
-		`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-
-		// directive order is random so we need to unmarshal and compare the elements
-		type expectedType struct {
-			Schema struct {
-				Directives []struct {
-					Name string
-					Args []struct {
-						Name string
-						Type struct {
-							Name string
-						}
-					}
-				}
-			} `json:"__schema"`
-		}
-
-		var actual expectedType
-		err := json.Unmarshal([]byte(resp.Data), &actual)
-		require.NoError(t, err)
-		var expected expectedType
-		err = json.Unmarshal([]byte(`
-		{
-			"__schema": {
-			  "directives": [
-				{
-				  "name": "include",
-				  "args": [
-					{
-					  "name": "if",
-					  "type": {
-						"name": null
-					  }
-					}
-				  ]
-				},
-				{
-				  "name": "skip",
-				  "args": [
-					{
-					  "name": "if",
-					  "type": {
-						"name": null
-					  }
-					}
-				  ]
-				},
-				{
-				  "name": "deprecated",
-				  "args": [
-					{
-					  "name": "reason",
-					  "type": {
-						"name": "String"
-					  }
-					}
-				  ]
-				}
-			  ]
-			}
-		  }
-		`), &expected)
-		require.NoError(t, err)
-		require.ElementsMatch(t, expected.Schema.Directives, actual.Schema.Directives)
-	})
-
-	t.Run("__schema", func(t *testing.T) {
-		query := gqlparser.MustLoadQuery(es.MergedSchema, `
-		{
-			__schema {
-				queryType {
-					name
-				}
-				mutationType {
-					name
-				}
-				subscriptionType {
-					name
-				}
-			}
-		}
-		`)
-		ctx := testContextWithoutVariables(query.Operations[0])
-		resp := es.ExecuteQuery(ctx)
-		require.JSONEq(t, `
-		{
-			"__schema": {
-				"queryType": {
-					"name": "Query"
-				},
-				"mutationType": null,
-				"subscriptionType": null
-			}
-			}
-		`, string(resp.Data))
-	})
-}
-
 func TestQueryWithNamespace(t *testing.T) {
 	f := &queryExecutionFixture{
 		services: []testService{
@@ -652,6 +202,7 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 
 		type Query {
 			snapshot(id: ID!): Snapshot!
+			snapshots: [Snapshot!]!
 		}`,
 		handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			body, _ := io.ReadAll(r.Body)
@@ -662,21 +213,42 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 						"snapshot": {
 							"id": "100",
 							"name": "foo",
-							"gizmos": [{ "_bramble_id": "GIZMO1", "id": "GIZMO1" }],
+							"gizmos": [{ "_bramble_id": "GIZMO1", "id": "GIZMO1", "_bramble__typename": "Gizmo" }],
 							"_bramble__typename": "GizmoImplementation"
 						}
 					}
 				}`))
-			} else {
+			} else if strings.Contains(string(body), "GADGET1") {
 				w.Write([]byte(`
 				{
 					"data": {
 						"snapshot": {
 							"id": "100",
 							"name": "foo",
-							"gadgets": [{ "_bramble_id": "GADGET1", "id": "GADGET1" }],
+							"gadgets": [{ "_bramble_id": "GADGET1", "id": "GADGET1", "_bramble__typename": "Gadget" }],
 							"_bramble__typename": "GadgetImplementation"
 						}
+					}
+				}`))
+
+			} else {
+				w.Write([]byte(`
+				{
+					"data": {
+						"snapshots": [
+							{
+								"id": "100",
+								"name": "foo",
+								"gadgets": [{ "_bramble_id": "GADGET1", "id": "GADGET1", "_bramble__typename": "Gadget" }],
+								"_bramble__typename": "GadgetImplementation"
+							},
+							{
+								"id": "100",
+								"name": "foo",
+								"gizmos": [{ "_bramble_id": "GIZMO1", "id": "GIZMO1", "_bramble__typename": "Gizmo" }],
+								"_bramble__typename": "GizmoImplementation"
+							}
+						]
 					}
 				}`))
 
@@ -715,6 +287,7 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 					"data": {
 						"_0": {
 							"_bramble_id": "GIZMO1",
+							"_bramble__typename": "Gizmo",
 							"id": "GIZMO1",
 							"name": "Gizmo #1"
 						}
@@ -727,6 +300,7 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 						"_result": [
 							{
 								"_bramble_id": "GADGET1",
+								"_bramble__typename": "Gadget",
 								"id": "GADGET1",
 								"name": "Gadget #1",
 								"agents": [
@@ -984,6 +558,102 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 		f.checkSuccess(t)
 	})
 
+	t.Run("with multiple top level fragment spreads (gadget implementation)", func(t *testing.T) {
+		f := &queryExecutionFixture{
+			services: []testService{serviceA, serviceB},
+			query: `
+			query Foo {
+				snapshot(id: "GADGET1") {
+					id
+					name
+					... GadgetFragment
+					... GizmoFragment
+				}
+			}
+
+			fragment GadgetFragment on GadgetImplementation {
+				gadgets {
+					id
+					name
+					agents {
+						name
+						... on Agent {
+							country
+						}
+					}
+				}
+			}
+
+			fragment GizmoFragment on GizmoImplementation {
+				gizmos {
+					id
+					name
+				}
+			}`,
+			expected: `
+			{
+				"snapshot": {
+					"id": "100",
+					"name": "foo",
+					"gadgets": [
+						{
+							"id": "GADGET1",
+							"name": "Gadget #1",
+							"agents": [
+								{"name": "James Bond", "country": "UK"}
+							]
+						}
+					]
+				}
+			}`,
+		}
+
+		f.checkSuccess(t)
+	})
+
+	t.Run("with nested abstract fragment spreads", func(t *testing.T) {
+		f := &queryExecutionFixture{
+			services: []testService{serviceA, serviceB},
+			query: `
+			query Foo {
+				snapshots {
+					...SnapshotFragment
+				}
+			}
+
+			fragment SnapshotFragment on Snapshot {
+				id
+				name
+				... on GadgetImplementation {
+					gadgets {
+						id
+						name
+					}
+				}
+			}`,
+			expected: `
+			{
+				"snapshots": [
+					{
+						"id": "100",
+						"name": "foo",
+						"gadgets": [
+							{
+								"id": "GADGET1",
+								"name": "Gadget #1"
+							}
+						]
+					},
+					{
+						"id": "100",
+						"name": "foo"
+					}
+				]
+			}`,
+		}
+
+		f.checkSuccess(t)
+	})
 }
 
 func TestQueryExecutionMultipleServices(t *testing.T) {
@@ -1004,6 +674,7 @@ func TestQueryExecutionMultipleServices(t *testing.T) {
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "Test title"
 							}
@@ -1028,6 +699,7 @@ func TestQueryExecutionMultipleServices(t *testing.T) {
 						"data": {
 							"_0": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"release": 2007
 							}
@@ -1074,6 +746,7 @@ func TestQueryExecutionServiceTimeout(t *testing.T) {
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "Test title"
 							}
@@ -1094,13 +767,13 @@ func TestQueryExecutionServiceTimeout(t *testing.T) {
 					movie(id: ID!): Movie! @boundary
 				}`,
 				handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-
-					time.Sleep(300 * time.Millisecond)
+					time.Sleep(20 * time.Millisecond)
 
 					response := jsonToInterfaceMap(`{
 						"data": {
 							"_0": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"release": 2007,
 								"slowField": "very slow field"
@@ -1136,7 +809,7 @@ func TestQueryExecutionServiceTimeout(t *testing.T) {
 					{Line: 5, Column: 5},
 				},
 				Extensions: map[string]interface{}{
-					"selectionSet": "{ slowField _bramble_id: id }",
+					"selectionSet": "{ slowField _bramble_id: id _bramble__typename: __typename }",
 				},
 			},
 		},
@@ -1363,6 +1036,7 @@ func TestQueryWithArrayBoundaryFieldsAndMultipleChildrenSteps(t *testing.T) {
 						"data": {
 							"randomMovie": {
 									"_bramble_id": "1",
+									"_bramble__typename": "Movie",
 									"id": "1",
 									"title": "Movie 1"
 							}
@@ -1373,9 +1047,9 @@ func TestQueryWithArrayBoundaryFieldsAndMultipleChildrenSteps(t *testing.T) {
 						w.Write([]byte(`{
 						"data": {
 							"_result": [
-								{ "_bramble_id": "2", "id": "2", "title": "Movie 2" },
-								{ "_bramble_id": "3", "id": "3", "title": "Movie 3" },
-								{ "_bramble_id": "4", "id": "4", "title": "Movie 4" }
+								{ "_bramble_id": "2", "_bramble__typename": "Movie", "id": "2", "title": "Movie 2" },
+								{ "_bramble_id": "3", "_bramble__typename": "Movie", "id": "3", "title": "Movie 3" },
+								{ "_bramble_id": "4", "_bramble__typename": "Movie", "id": "4", "title": "Movie 4" }
 							]
 						}
 					}
@@ -1400,10 +1074,11 @@ func TestQueryWithArrayBoundaryFieldsAndMultipleChildrenSteps(t *testing.T) {
 							"_result": [
 								{
 									"_bramble_id": "1",
+									"_bramble__typename": "Movie",
 									"compTitles": [
-										{"_bramble_id": "2", "id": "2"},
-										{"_bramble_id": "3", "id": "3"},
-										{"_bramble_id": "4", "id": "4"}
+										{"_bramble_id": "2", "_bramble__typename": "Movie", "id": "2"},
+										{"_bramble_id": "3", "_bramble__typename": "Movie", "id": "3"},
+										{"_bramble_id": "4", "_bramble__typename": "Movie", "id": "4"}
 									]
 								}
 							]
@@ -1468,15 +1143,18 @@ func TestQueryWithBoundaryFieldsAndNullsAboveInsertionPoint(t *testing.T) {
 					response := jsonToInterfaceMap(`{
 						"data": {
 							"ns": {
+								"_bramble__typename": "Namespace",
 								"movies": [
 									{
 										"_bramble_id": "MOVIE1",
+										"_bramble__typename": "Movie",
 										"id": "MOVIE1",
 										"title": "Movie #1",
-										"director": { "_bramble_id": "DIRECTOR1", "id": "DIRECTOR1" }
+										"director": { "_bramble_id": "DIRECTOR1", "_bramble__typename": "Person", "id": "DIRECTOR1" }
 									},
 									{
 										"_bramble_id": "MOVIE2",
+										"_bramble__typename": "Movie",
 										"id": "MOVIE2",
 										"title": "Movie #2",
 										"director": null
@@ -1507,6 +1185,7 @@ func TestQueryWithBoundaryFieldsAndNullsAboveInsertionPoint(t *testing.T) {
 							"data": {
 								"_0": {
 									"_bramble_id": "DIRECTOR1",
+									"_bramble__typename": "Person",
 									"name": "David Fincher"
 								}
 							}
@@ -1550,86 +1229,6 @@ func TestQueryWithBoundaryFieldsAndNullsAboveInsertionPoint(t *testing.T) {
 	f.checkSuccess(t)
 }
 
-func TestExtractBoundaryIDs(t *testing.T) {
-	dataJSON := `{
-		"gizmos": [
-			{
-				"_bramble_id": "1",
-				"name": "Gizmo 1",
-				"owner": {
-					"_bramble_id": "1"
-				}
-			},
-			{
-				"_bramble_id": "2",
-				"name": "Gizmo 2",
-				"owner": {
-					"_bramble_id": "1"
-				}
-			},
-			{
-				"_bramble_id": "3",
-				"name": "Gizmo 3",
-				"owner": {
-					"_bramble_id": "2"
-				}
-			},
-			{
-				"_bramble_id": "4",
-				"name": "Gizmo 4",
-				"owner": {
-					"_bramble_id": "5"
-				}
-			}
-		]
-	}`
-	data := map[string]interface{}{}
-	expected := []string{"1", "1", "2", "5"}
-	insertionPoint := []string{"gizmos", "owner"}
-	require.NoError(t, json.Unmarshal([]byte(dataJSON), &data))
-	result, err := extractBoundaryIDs(data, insertionPoint)
-	require.NoError(t, err)
-	require.Equal(t, expected, result)
-}
-
-func TestTrimInsertionPointForNestedBoundaryQuery(t *testing.T) {
-	dataJSON := `[
-			{
-				"id": "1",
-				"name": "Gizmo 1",
-				"owner": {
-					"_bramble_id": "1"
-				}
-			},
-			{
-				"id": "2",
-				"name": "Gizmo 2",
-				"owner": {
-					"id": "1"
-				}
-			},
-			{
-				"id": "3",
-				"name": "Gizmo 3",
-				"owner": {
-					"_bramble_id": "2"
-				}
-			},
-			{
-				"id": "4",
-				"name": "Gizmo 4",
-				"owner": {
-					"id": "5"
-				}
-			}
-		]`
-	insertionPoint := []string{"namespace", "gizmos", "owner"}
-	expected := []string{"owner"}
-	result, err := trimInsertionPointForNestedBoundaryStep(jsonToInterfaceSlice(dataJSON), insertionPoint)
-	require.NoError(t, err)
-	require.Equal(t, expected, result)
-}
-
 func TestNestingNullableBoundaryTypes(t *testing.T) {
 	t.Run("nested boundary types are all null", func(t *testing.T) {
 		f := &queryExecutionFixture{
@@ -1650,14 +1249,17 @@ func TestNestingNullableBoundaryTypes(t *testing.T) {
 									"tastyGizmos": [
 										{
 											"_bramble_id": "beehasknees",
+											"_bramble__typename": "Gizmo",
 											"id": "beehasknees"
 										},
 										{
 											"_bramble_id": "umlaut",
+											"_bramble__typename": "Gizmo",
 											"id": "umlaut"
 										},
 										{
 											"_bramble_id": "probanana",
+											"_bramble__typename": "Gizmo",
 											"id": "probanana"
 										}
 									]
@@ -1751,14 +1353,17 @@ func TestNestingNullableBoundaryTypes(t *testing.T) {
 									"tastyGizmos": [
 										{
 											"_bramble_id": "beehasknees",
+											"_bramble__typename": "Gizmo",
 											"id": "beehasknees"
 										},
 										{
 											"_bramble_id": "umlaut",
+											"_bramble__typename": "Gizmo",
 											"id": "umlaut"
 										},
 										{
 											"_bramble_id": "probanana",
+											"_bramble__typename": "Gizmo",
 											"id": "probanana"
 										}
 									]
@@ -1787,14 +1392,17 @@ func TestNestingNullableBoundaryTypes(t *testing.T) {
 								null,
 								{
 									"_bramble_id": "umlaut",
+									"_bramble__typename": "Gizmo",
 									"id": "umlaut",
 									"wizzle": null
 								},
 								{
 									"_bramble_id": "probanana",
+									"_bramble__typename": "Gizmo",
 									"id": "probanana",
 									"wizzle": {
 										"_bramble_id": "bananawizzle",
+										"_bramble__typename": "Wizzle",
 										"id": "bananawizzle"
 									}
 								}
@@ -1818,6 +1426,7 @@ func TestNestingNullableBoundaryTypes(t *testing.T) {
 							"_result": [
 								{
 									"_bramble_id": "bananawizzle",
+									"_bramble__typename": "Wizzle",
 									"id": "bananawizzle",
 									"bazingaFactor": 4
 								}
@@ -1861,2114 +1470,6 @@ func TestNestingNullableBoundaryTypes(t *testing.T) {
 		f.checkSuccess(t)
 	})
 
-}
-
-func TestBuildBoundaryQueryDocuments(t *testing.T) {
-	ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-			getOwners(ids: [ID!]!): [Owner!]!
-		}
-	`
-	schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-	boundaryField := BoundaryField{Field: "getOwners", Argument: "ids", Array: true}
-	ids := []string{"1", "2", "3"}
-	selectionSet := []ast.Selection{
-		&ast.Field{
-			Alias:            "_bramble_id",
-			Name:             "id",
-			Definition:       schema.Types["Owner"].Fields.ForName("id"),
-			ObjectDefinition: schema.Types["Owner"],
-		},
-		&ast.Field{
-			Alias:            "name",
-			Name:             "name",
-			Definition:       schema.Types["Owner"].Fields.ForName("name"),
-			ObjectDefinition: schema.Types["Owner"],
-		},
-	}
-	step := &QueryPlanStep{
-		ServiceURL:     "http://example.com:8080",
-		ServiceName:    "test",
-		ParentType:     "Gizmo",
-		SelectionSet:   selectionSet,
-		InsertionPoint: []string{"gizmos", "owner"},
-		Then:           nil,
-	}
-	expected := []string{`{ _result: getOwners(ids: ["1", "2", "3"]) { _bramble_id: id name } }`}
-	ctx := testContextWithoutVariables(nil)
-	docs, err := buildBoundaryQueryDocuments(ctx, schema, step, ids, boundaryField, 1)
-	require.NoError(t, err)
-	require.Equal(t, expected, docs)
-}
-
-func TestBuildNonArrayBoundaryQueryDocuments(t *testing.T) {
-	ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-			getOwner(id: ID!): Owner!
-		}
-	`
-	schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-	boundaryField := BoundaryField{Field: "getOwner", Argument: "id", Array: false}
-	ids := []string{"1", "2", "3"}
-	selectionSet := []ast.Selection{
-		&ast.Field{
-			Alias:            "_bramble_id",
-			Name:             "id",
-			Definition:       schema.Types["Owner"].Fields.ForName("id"),
-			ObjectDefinition: schema.Types["Owner"],
-		},
-		&ast.Field{
-			Alias:            "name",
-			Name:             "name",
-			Definition:       schema.Types["Owner"].Fields.ForName("name"),
-			ObjectDefinition: schema.Types["Owner"],
-		},
-	}
-	step := &QueryPlanStep{
-		ServiceURL:     "http://example.com:8080",
-		ServiceName:    "test",
-		ParentType:     "Gizmo",
-		SelectionSet:   selectionSet,
-		InsertionPoint: []string{"gizmos", "owner"},
-		Then:           nil,
-	}
-	expected := []string{`{ _0: getOwner(id: "1") { _bramble_id: id name } _1: getOwner(id: "2") { _bramble_id: id name } _2: getOwner(id: "3") { _bramble_id: id name } }`}
-	ctx := testContextWithoutVariables(nil)
-	docs, err := buildBoundaryQueryDocuments(ctx, schema, step, ids, boundaryField, 10)
-	require.NoError(t, err)
-	require.Equal(t, expected, docs)
-}
-
-func TestBuildBatchedNonArrayBoundaryQueryDocuments(t *testing.T) {
-	ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-			getOwner(id: ID!): Owner!
-		}
-	`
-	schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-	boundaryField := BoundaryField{Field: "getOwner", Argument: "id", Array: false}
-	ids := []string{"1", "2", "3"}
-	selectionSet := []ast.Selection{
-		&ast.Field{
-			Alias:            "_bramble_id",
-			Name:             "id",
-			Definition:       schema.Types["Owner"].Fields.ForName("id"),
-			ObjectDefinition: schema.Types["Owner"],
-		},
-		&ast.Field{
-			Alias:            "name",
-			Name:             "name",
-			Definition:       schema.Types["Owner"].Fields.ForName("name"),
-			ObjectDefinition: schema.Types["Owner"],
-		},
-	}
-	step := &QueryPlanStep{
-		ServiceURL:     "http://example.com:8080",
-		ServiceName:    "test",
-		ParentType:     "Gizmo",
-		SelectionSet:   selectionSet,
-		InsertionPoint: []string{"gizmos", "owner"},
-		Then:           nil,
-	}
-	expected := []string{`{ _0: getOwner(id: "1") { _bramble_id: id name } _1: getOwner(id: "2") { _bramble_id: id name } }`, `{ _2: getOwner(id: "3") { _bramble_id: id name } }`}
-	ctx := testContextWithoutVariables(nil)
-	docs, err := buildBoundaryQueryDocuments(ctx, schema, step, ids, boundaryField, 2)
-	require.NoError(t, err)
-	require.Equal(t, expected, docs)
-}
-
-func TestMergeExecutionResults(t *testing.T) {
-	t.Run("merges single map", func(t *testing.T) {
-		inputMap := jsonToInterfaceMap(`{
-			"gizmo": {
-				"_bramble_id": "1",
-				"id": "1",
-				"color": "Gizmo A"
-			}
-		}`)
-
-		result := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMap,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{result})
-
-		require.NoError(t, err)
-		require.Equal(t, inputMap, mergedMap)
-	})
-
-	t.Run("merges two top level results", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmoA": {
-				"id": "1",
-				"color": "Gizmo A"
-			}
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputMapB := jsonToInterfaceMap(`{
-			"gizmoB": {
-				"id": "2",
-				"color": "Gizmo B"
-			}
-		}`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{},
-			Data:           inputMapB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`{
-			"gizmoA": {
-				"id": "1",
-				"color": "Gizmo A"
-			},
-			"gizmoB": {
-				"id": "2",
-				"color": "Gizmo B"
-			}
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-
-	t.Run("merges mid level array", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmo": {
-				"_bramble_id": "1",
-				"gadgets": [
-					{"_bramble_id": "GADGET1", "owner": { "_bramble_id": "OWNER1" }},
-					{"_bramble_id": "GADGET3", "owner": { "_bramble_id": "OWNER3" }},
-					{"_bramble_id": "GADGET2", "owner": null}
-				]
-			}
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputMapB := jsonToInterfaceSlice(`[
-			{
-				"_bramble_id": "OWNER1",
-				"name": "008"
-			}
-		]`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{"gizmo", "gadgets", "owner"},
-			Data:           inputMapB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`
-		{
-			"gizmo": {
-				"gadgets": [
-					{
-						"_bramble_id": "GADGET1",
-						"owner": {
-							"_bramble_id": "OWNER1",
-							"name": "008"
-						}
-					},
-					{
-						"_bramble_id": "GADGET3",
-						"owner": {
-							"_bramble_id": "OWNER3"
-						}
-					},
-					{
-						"_bramble_id": "GADGET2",
-						"owner": null
-					}
-				],
-				"_bramble_id": "1"
-			}
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-
-	t.Run("merges nested mid-level array", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmo": {
-				"_bramble_id": "1",
-				"gadgets": [
-					[
-						{"_bramble_id": "GADGET1", "owner": { "_bramble_id": "OWNER1" }},
-						{"_bramble_id": "GADGET3", "owner": { "_bramble_id": "OWNER3" }}
-					],
-					[
-						{"_bramble_id": "GADGET2", "owner": null}
-					]
-				]
-			}
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputMapB := jsonToInterfaceSlice(`[
-			{
-				"_bramble_id": "OWNER1",
-				"name": "008"
-			}
-		]`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{"gizmo", "gadgets", "owner"},
-			Data:           inputMapB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`
-		{
-			"gizmo": {
-				"gadgets": [
-					[
-						{
-							"_bramble_id": "GADGET1",
-							"owner": {
-								"_bramble_id": "OWNER1",
-								"name": "008"
-							}
-						},
-						{
-							"_bramble_id": "GADGET3",
-							"owner": {
-								"_bramble_id": "OWNER3"
-							}
-						}
-					],
-					[
-						{
-							"_bramble_id": "GADGET2",
-							"owner": null
-						}
-					]
-				],
-				"_bramble_id": "1"
-			}
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-
-	t.Run("merges root step with child step (root step returns object, boundary field is non array)", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmo": {
-				"id": "1",
-				"color": "Gizmo A",
-				"owner": {
-					"_bramble_id": "1"
-				}
-			}
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputSliceB := jsonToInterfaceSlice(`[
-			{
-				"_bramble_id": "1",
-				"name": "Owner A"
-			}
-		]`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{"gizmo", "owner"},
-			Data:           inputSliceB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`{
-			"gizmo": {
-				"id": "1",
-				"color": "Gizmo A",
-				"owner": {
-					"_bramble_id": "1",
-					"name": "Owner A"
-				}
-			}
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-
-	t.Run("merges root step with child step (root step returns array, boundary field is non array)", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmos": [
-				{
-					"id": "1",
-					"color": "RED",
-					"owner": {
-						"_bramble_id": "4"
-					}
-				},
-				{
-					"id": "2",
-					"color": "GREEN",
-					"owner": {
-						"_bramble_id": "5"
-					}
-				},
-				{
-					"id": "3",
-					"color": "BLUE",
-					"owner": {
-						"_bramble_id": "6"
-					}
-				}
-			]
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputSliceB := jsonToInterfaceSlice(`[
-			{
-				"_bramble_id": "4",
-				"name": "Owner A"
-			},
-			{
-				"_bramble_id": "5",
-				"name": "Owner B"
-			},
-			{
-				"_bramble_id": "6",
-				"name": "Owner C"
-			}
-		]`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{"gizmos", "owner"},
-			Data:           inputSliceB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`{
-			"gizmos": [
-				{
-					"id": "1",
-					"color": "RED",
-					"owner": {
-						"_bramble_id": "4",
-						"name": "Owner A"
-					}
-				},
-				{
-					"id": "2",
-					"color": "GREEN",
-					"owner": {
-						"_bramble_id": "5",
-						"name": "Owner B"
-					}
-				},
-				{
-					"id": "3",
-					"color": "BLUE",
-					"owner": {
-						"_bramble_id": "6",
-						"name": "Owner C"
-					}
-				}
-			]
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-
-	t.Run("merges root step with child step (root step returns array, boundary field is array)", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmos": [
-				{
-					"id": "1",
-					"color": "RED",
-					"owner": {
-						"_bramble_id": "4"
-					}
-				},
-				{
-					"id": "2",
-					"color": "GREEN",
-					"owner": {
-						"_bramble_id": "5"
-					}
-				},
-				{
-					"id": "3",
-					"color": "BLUE",
-					"owner": {
-						"_bramble_id": "6"
-					}
-				}
-			]
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputSliceB := jsonToInterfaceSlice(`[
-			{
-				"_bramble_id": "4",
-				"name": "Owner A"
-			},
-			{
-				"_bramble_id": "5",
-				"name": "Owner B"
-			},
-			{
-				"_bramble_id": "6",
-				"name": "Owner C"
-			}
-		]`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{"gizmos", "owner"},
-			Data:           inputSliceB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`{
-			"gizmos": [
-				{
-					"id": "1",
-					"color": "RED",
-					"owner": {
-						"_bramble_id": "4",
-						"name": "Owner A"
-					}
-				},
-				{
-					"id": "2",
-					"color": "GREEN",
-					"owner": {
-						"_bramble_id": "5",
-						"name": "Owner B"
-					}
-				},
-				{
-					"id": "3",
-					"color": "BLUE",
-					"owner": {
-						"_bramble_id": "6",
-						"name": "Owner C"
-					}
-				}
-			]
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-
-	t.Run("merges using '_bramble_id'", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmos": [
-				{
-					"_bramble_id": "1",
-					"color": "RED",
-					"owner": {
-						"_bramble_id": "4"
-					}
-				},
-				{
-					"_bramble_id": "2",
-					"color": "GREEN",
-					"owner": {
-						"_bramble_id": "5"
-					}
-				},
-				{
-					"_bramble_id": "3",
-					"color": "BLUE",
-					"owner": {
-						"_bramble_id": "6"
-					}
-				}
-			]
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputSliceB := jsonToInterfaceSlice(`[
-			{
-				"_bramble_id": "4",
-				"name": "Owner A"
-			},
-			{
-				"_bramble_id": "5",
-				"name": "Owner B"
-			},
-			{
-				"_bramble_id": "6",
-				"name": "Owner C"
-			}
-		]`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{"gizmos", "owner"},
-			Data:           inputSliceB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`{
-			"gizmos": [
-				{
-					"_bramble_id": "1",
-					"color": "RED",
-					"owner": {
-						"_bramble_id": "4",
-						"name": "Owner A"
-					}
-				},
-				{
-					"_bramble_id": "2",
-					"color": "GREEN",
-					"owner": {
-						"_bramble_id": "5",
-						"name": "Owner B"
-					}
-				},
-				{
-					"_bramble_id": "3",
-					"color": "BLUE",
-					"owner": {
-						"_bramble_id": "6",
-						"name": "Owner C"
-					}
-				}
-			]
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-
-	t.Run("merges with nil destination", func(t *testing.T) {
-		inputMapA := jsonToInterfaceMap(`{
-			"gizmo": {
-				"_bramble_id": "1",
-				"gadgets": [
-					[
-						{"_bramble_id": "GADGET1", "details": { "owner": {"_bramble_id": "OWNER1" }}}
-					],
-					[
-						{"_bramble_id": "GADGET2", "details": null}
-					]
-				]
-			}
-		}`)
-
-		resultA := executionResult{
-			ServiceURL:     "http://service-a",
-			InsertionPoint: []string{},
-			Data:           inputMapA,
-		}
-
-		inputMapB := jsonToInterfaceSlice(`[
-			{
-				"_bramble_id": "OWNER1",
-				"name": "Alice"
-			}
-		]`)
-
-		resultB := executionResult{
-			ServiceURL:     "http://service-b",
-			InsertionPoint: []string{"gizmo", "gadgets", "details", "owner"},
-			Data:           inputMapB,
-		}
-
-		mergedMap, err := mergeExecutionResults([]executionResult{resultA, resultB})
-
-		expected := jsonToInterfaceMap(`
-		{
-			"gizmo": {
-				"gadgets": [
-					[
-						{
-							"_bramble_id": "GADGET1",
-							"details": {
-								"owner": {
-									"_bramble_id": "OWNER1",
-									"name": "Alice"
-								}
-							}
-						}
-					],
-					[
-						{
-							"_bramble_id": "GADGET2",
-							"details": null
-						}
-					]
-				],
-				"_bramble_id": "1"
-			}
-		}`)
-
-		require.NoError(t, err)
-		require.Equal(t, expected, mergedMap)
-	})
-}
-
-func TestUnionAndTrimSelectionSet(t *testing.T) {
-	schemaString := `
-		directive @boundary on OBJECT
-		interface Tool {
-			id: ID!
-			name: String!
-		}
-
-		union GadgetOrGizmo = Gadget | Gizmo
-
-		type Gizmo @boundary {
-			id: ID!
-		}
-
-		type Gadget @boundary {
-			id: ID!
-		}
-
-		type Agent {
-			id: ID!
-			name: String!
-			country: Country!
-		}
-
-		type Country {
-			id: ID!
-			name: String!
-		}
-
-		type GizmoImplementation implements Tool {
-			id: ID!
-			name: String!
-			gizmos: [Gizmo!]!
-		}
-
-		type GadgetImplementation implements Tool {
-			id: ID!
-			name: String!
-			gadgets: [Gadget!]!
-		}
-
-		type Query {
-			tool(id: ID!): Tool!
-		}`
-
-	schema := gqlparser.MustLoadSchema(&ast.Source{Input: schemaString})
-	ctx := testContextWithoutVariables(nil)
-
-	t.Run("does not touch simple selection sets", func(t *testing.T) {
-		selectionSet := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "id",
-				Name:             "id",
-				Definition:       schema.Types["Agent"].Fields.ForName("id"),
-				ObjectDefinition: schema.Types["Agent"],
-			},
-			&ast.Field{
-				Alias:            "name",
-				Name:             "name",
-				Definition:       schema.Types["Agent"].Fields.ForName("name"),
-				ObjectDefinition: schema.Types["Agent"],
-			},
-			&ast.Field{
-				Alias:            "country",
-				Name:             "country",
-				Definition:       schema.Types["Agent"].Fields.ForName("country"),
-				ObjectDefinition: schema.Types["Agent"],
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "id",
-						Name:             "id",
-						Definition:       schema.Types["Country"].Fields.ForName("id"),
-						ObjectDefinition: schema.Types["Country"],
-					},
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["Country"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["Country"],
-					},
-				},
-			},
-		}
-
-		filtered := unionAndTrimSelectionSet("", schema, selectionSet)
-		require.Equal(t, selectionSet, filtered)
-	})
-
-	t.Run("removes duplicate leaf values and merges composite scopes", func(t *testing.T) {
-		selectionSet := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "name",
-				Name:             "name",
-				Definition:       schema.Types["Agent"].Fields.ForName("name"),
-				ObjectDefinition: schema.Types["Agent"],
-			},
-			&ast.Field{
-				Alias:            "name",
-				Name:             "name",
-				Definition:       schema.Types["Agent"].Fields.ForName("name"),
-				ObjectDefinition: schema.Types["Agent"],
-			},
-			&ast.Field{
-				Alias:            "country",
-				Name:             "country",
-				Definition:       schema.Types["Agent"].Fields.ForName("country"),
-				ObjectDefinition: schema.Types["Agent"],
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "id",
-						Name:             "id",
-						Definition:       schema.Types["Country"].Fields.ForName("id"),
-						ObjectDefinition: schema.Types["Country"],
-					},
-				},
-			},
-			&ast.Field{
-				Alias:            "country",
-				Name:             "country",
-				Definition:       schema.Types["Agent"].Fields.ForName("country"),
-				ObjectDefinition: schema.Types["Agent"],
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["Country"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["Country"],
-					},
-				},
-			},
-		}
-
-		filtered := unionAndTrimSelectionSet("", schema, selectionSet)
-		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, filtered), "{ name country { id name } }")
-	})
-
-	t.Run("removes field duplicates from inline fragment", func(t *testing.T) {
-		initialSelectionSet := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "id",
-				Name:             "id",
-				Definition:       schema.Types["Tool"].Fields.ForName("id"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.Field{
-				Alias:            "name",
-				Name:             "name",
-				Definition:       schema.Types["Tool"].Fields.ForName("name"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["GizmoImplementation"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "id",
-						Name:             "id",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("id"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-					},
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-					},
-					&ast.Field{
-						Alias:            "gizmos",
-						Name:             "gizmos",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("gizmos"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-						SelectionSet: []ast.Selection{
-							&ast.Field{
-								Alias:            "id",
-								Name:             "id",
-								Definition:       schema.Types["Gizmo"].Fields.ForName("id"),
-								ObjectDefinition: schema.Types["Gizmo"],
-							},
-						},
-					},
-				},
-				ObjectDefinition: schema.Types["GizmoImplementation"],
-			},
-		}
-
-		expected := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "id",
-				Name:             "id",
-				Definition:       schema.Types["Tool"].Fields.ForName("id"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.Field{
-				Alias:            "name",
-				Name:             "name",
-				Definition:       schema.Types["Tool"].Fields.ForName("name"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["GizmoImplementation"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "gizmos",
-						Name:             "gizmos",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("gizmos"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-						SelectionSet: []ast.Selection{
-							&ast.Field{
-								Alias:            "id",
-								Name:             "id",
-								Definition:       schema.Types["Gizmo"].Fields.ForName("id"),
-								ObjectDefinition: schema.Types["Gizmo"],
-							},
-						},
-					},
-				},
-				ObjectDefinition: schema.Types["GizmoImplementation"],
-			},
-		}
-
-		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
-	})
-
-	t.Run("removes inline fragment if it only contains duplicate selections", func(t *testing.T) {
-		initialSelectionSet := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "id",
-				Name:             "id",
-				Definition:       schema.Types["Tool"].Fields.ForName("id"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.Field{
-				Alias:            "name",
-				Name:             "name",
-				Definition:       schema.Types["Tool"].Fields.ForName("name"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["GizmoImplementation"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "id",
-						Name:             "id",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("id"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-					},
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-					},
-				},
-				ObjectDefinition: schema.Types["GizmoImplementation"],
-			},
-		}
-
-		expected := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "id",
-				Name:             "id",
-				Definition:       schema.Types["Tool"].Fields.ForName("id"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.Field{
-				Alias:            "name",
-				Name:             "name",
-				Definition:       schema.Types["Tool"].Fields.ForName("name"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-		}
-
-		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
-	})
-
-	t.Run("removes inline fragment that does not match typename", func(t *testing.T) {
-		initialSelectionSet := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "id",
-				Name:             "id",
-				Definition:       schema.Types["Tool"].Fields.ForName("id"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["GizmoImplementation"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "id",
-						Name:             "id",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("id"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-					},
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-					},
-				},
-				ObjectDefinition: schema.Types["GizmoImplementation"],
-			},
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["GadgetImplementation"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["GadgetImplementation"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["GadgetImplementation"],
-					},
-				},
-				ObjectDefinition: schema.Types["GadgetImplementation"],
-			},
-		}
-
-		expected := ast.SelectionSet{
-			&ast.Field{
-				Alias:            "id",
-				Name:             "id",
-				Definition:       schema.Types["Tool"].Fields.ForName("id"),
-				ObjectDefinition: schema.Types["Tool"],
-			},
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["GizmoImplementation"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["GizmoImplementation"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["GizmoImplementation"],
-					},
-				},
-				ObjectDefinition: schema.Types["GizmoImplementation"],
-			},
-		}
-
-		filtered := unionAndTrimSelectionSet("GizmoImplementation", schema, initialSelectionSet)
-		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
-	})
-
-	t.Run("works with unions", func(t *testing.T) {
-		initialSelectionSet := ast.SelectionSet{
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["Gizmo"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "id",
-						Name:             "id",
-						Definition:       schema.Types["Gizmo"].Fields.ForName("id"),
-						ObjectDefinition: schema.Types["Gizmo"],
-					},
-				},
-				ObjectDefinition: schema.Types["GadgetOrGizmo"],
-			},
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["Gadget"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["Gadget"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["Gadget"],
-					},
-				},
-				ObjectDefinition: schema.Types["GadgetOrGizmo"],
-			},
-		}
-
-		expected := ast.SelectionSet{
-			&ast.InlineFragment{
-				TypeCondition: schema.Types["Gadget"].Name,
-				SelectionSet: []ast.Selection{
-					&ast.Field{
-						Alias:            "name",
-						Name:             "name",
-						Definition:       schema.Types["Gadget"].Fields.ForName("name"),
-						ObjectDefinition: schema.Types["Gadget"],
-					},
-				},
-				ObjectDefinition: schema.Types["GadgetOrGizmo"],
-			},
-		}
-
-		filtered := unionAndTrimSelectionSet("Gadget", schema, initialSelectionSet)
-		require.Equal(t, formatSelectionSetSingleLine(ctx, schema, expected), formatSelectionSetSingleLine(ctx, schema, filtered))
-	})
-}
-
-func TestBubbleUpNullValuesInPlace(t *testing.T) {
-	t.Run("no expected or unexpected nulls", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "id": "GIZMO1" },
-					{ "id": "GIZMO2" },
-					{ "id": "GIZMO3" }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-				}
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Nil(t, errs)
-	})
-
-	t.Run("1 expected null (bubble to root)", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "id": "GIZMO1", "color": "RED" },
-					{ "id": "GIZMO2", "color": "GREEN" },
-					{ "id": "GIZMO3", "color": null }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-				}
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.Equal(t, errNullBubbledToRoot, err)
-		require.Len(t, errs, 1)
-	})
-
-	t.Run("1 expected null (bubble to middle)", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "id": "GIZMO1", "color": "RED" },
-					{ "id": "GIZMO2", "color": "GREEN" },
-					{ "id": "GIZMO3", "color": null }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-				}
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Equal(t, []*gqlerror.Error([]*gqlerror.Error{
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("gizmos"), ast.PathIndex(2), ast.PathName("color")},
-				Extensions: nil,
-			}}), errs)
-		require.Equal(t, jsonToInterfaceMap(`{ "gizmos": null }`), result)
-	})
-
-	t.Run("all nulls (bubble to middle)", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "id": "GIZMO1", "color": null },
-					{ "id": "GIZMO2", "color": null },
-					{ "id": "GIZMO3", "color": null }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-				}
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Equal(t, []*gqlerror.Error([]*gqlerror.Error{
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("gizmos"), ast.PathIndex(0), ast.PathName("color")},
-				Extensions: nil,
-			},
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("gizmos"), ast.PathIndex(1), ast.PathName("color")},
-				Extensions: nil,
-			},
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("gizmos"), ast.PathIndex(2), ast.PathName("color")},
-				Extensions: nil,
-			},
-		}), errs)
-		require.Equal(t, jsonToInterfaceMap(`{ "gizmos": null }`), result)
-	})
-
-	t.Run("1 expected null (bubble to middle in array)", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo]!
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "id": "GIZMO1", "color": "RED" },
-					{ "id": "GIZMO3", "color": null },
-					{ "id": "GIZMO2", "color": "GREEN" }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-				}
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Equal(t, []*gqlerror.Error([]*gqlerror.Error{
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("gizmos"), ast.PathIndex(1), ast.PathName("color")},
-				Extensions: nil,
-			}}), errs)
-		require.Equal(t, jsonToInterfaceMap(`{ "gizmos": [ { "id": "GIZMO1", "color": "RED" }, null, { "id": "GIZMO2", "color": "GREEN" } ]	}`), result)
-	})
-
-	t.Run("0 expected nulls", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		resultJSON := `{
-			"gizmos": [
-				{ "id": "GIZMO1", "color": "RED" },
-				{ "id": "GIZMO2", "color": "GREEN" },
-				{ "id": "GIZMO3", "color": null }
-			]
-		}`
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-				}
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		result := jsonToInterfaceMap(resultJSON)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Empty(t, errs)
-		require.Equal(t, jsonToInterfaceMap(resultJSON), result)
-	})
-
-	t.Run("works with fragment spreads", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo]!
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		resultJSON := `{
-			"gizmos": [
-				{ "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo" },
-				{ "id": "GIZMO2", "color": "GREEN", "_bramble__typename": "Gizmo" },
-				{ "id": "GIZMO3", "color": null, "_bramble__typename": "Gizmo" }
-			]
-		}`
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			fragment GizmoDetails on Gizmo {
-				id
-				color
-				__typename
-			}
-			{
-				gizmos {
-					...GizmoDetails
-				}
-			}
-		`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-
-		result := jsonToInterfaceMap(resultJSON)
-
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Equal(t, []*gqlerror.Error([]*gqlerror.Error{
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("gizmos"), ast.PathIndex(2), ast.PathName("color")},
-				Extensions: nil,
-			}}), errs)
-		require.Equal(t, jsonToInterfaceMap(`{ "gizmos": [ { "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo" }, { "id": "GIZMO2", "color": "GREEN", "_bramble__typename": "Gizmo" }, null ]	}`), result)
-	})
-
-	t.Run("works with inline fragments", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo]!
-			getOwners(ids: [ID!]!): [Owner!]!
-		}`
-
-		resultJSON := `{
-			"gizmos": [
-				{ "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo" },
-				{ "id": "GIZMO2", "color": "GREEN", "_bramble__typename": "Gizmo" },
-				{ "id": "GIZMO3", "color": null, "_bramble__typename": "Gizmo" }
-			]
-		}`
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					... on Gizmo {
-						id
-						color
-						__typename
-					}
-				}
-			}
-		`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		result := jsonToInterfaceMap(resultJSON)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Equal(t, []*gqlerror.Error([]*gqlerror.Error{
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("gizmos"), ast.PathIndex(2), ast.PathName("color")},
-				Extensions: nil,
-			}}), errs)
-		require.Equal(t, jsonToInterfaceMap(`{ "gizmos": [ { "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo" }, { "id": "GIZMO2", "color": "GREEN", "_bramble__typename": "Gizmo" }, null ]	}`), result)
-	})
-
-	t.Run("inline fragment inside interface", func(t *testing.T) {
-		ddl := `
-		interface Critter {
-			id: ID!
-		}
-
-		type Gizmo implements Critter {
-			id: ID!
-			color: String!
-		}
-
-		type Gremlin implements Critter {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			critters: [Critter]!
-		}`
-
-		resultJSON := `{
-			"critters": [
-				{ "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo" },
-				{ "id": "GREMLIN1", "name": "Spikey", "_bramble__typename": "Gremlin" },
-				{ "id": "GIZMO2", "color": null, "_bramble__typename": "Gizmo" }
-			]
-		}`
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				critters {
-					id
-					... on Gizmo {
-						color
-						__typename
-					}
-					... on Gremlin {
-						name
-						__typename
-					}
-				}
-			}
-		`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		result := jsonToInterfaceMap(resultJSON)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Equal(t, []*gqlerror.Error([]*gqlerror.Error{
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("critters"), ast.PathIndex(2), ast.PathName("color")},
-				Extensions: nil,
-			}}), errs)
-		require.Equal(t, jsonToInterfaceMap(`{ "critters": [ { "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo"  }, { "id": "GREMLIN1", "name": "Spikey", "_bramble__typename": "Gremlin" }, null ]	}`), result)
-	})
-
-	t.Run("fragment spread inside interface", func(t *testing.T) {
-		ddl := `
-		interface Critter {
-			id: ID!
-		}
-
-		type Gizmo implements Critter {
-			id: ID!
-			color: String!
-		}
-
-		type Gremlin implements Critter {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			critters: [Critter]!
-		}`
-
-		resultJSON := `{
-			"critters": [
-				{ "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo" },
-				{ "id": "GREMLIN1", "name": "Spikey", "_bramble__typename": "Gremlin" },
-				{ "id": "GIZMO2", "color": null, "_bramble__typename": "Gizmo" }
-			]
-		}`
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			fragment CritterDetails on Critter {
-				... on Gizmo {
-					color
-					__typename
-				}
-				... on Gremlin {
-					name
-					__typename
-				}
-			}
-
-			{
-				critters {
-					id
-					... CritterDetails
-				}
-			}
-		`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		result := jsonToInterfaceMap(resultJSON)
-		errs, err := bubbleUpNullValuesInPlace(schema, document.Operations[0].SelectionSet, result)
-		require.NoError(t, err)
-		require.Equal(t, []*gqlerror.Error([]*gqlerror.Error{
-			{
-				Message:    `got a null response for non-nullable field "color"`,
-				Path:       ast.Path{ast.PathName("critters"), ast.PathIndex(2), ast.PathName("color")},
-				Extensions: nil,
-			}}), errs)
-		require.Equal(t, jsonToInterfaceMap(`{ "critters": [ { "id": "GIZMO1", "color": "RED", "_bramble__typename": "Gizmo"  }, { "id": "GREMLIN1", "name": "Spikey", "_bramble__typename": "Gremlin" }, null ]	}`), result)
-	})
-}
-
-func TestFormatResponseBody(t *testing.T) {
-	t.Run("simple response with no errors", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "color": "RED","owner": { "name": "Owner1", "id": "1" }, "id": "GIZMO1" },
-					{ "color": "BLUE","owner": { "name": "Owner2", "id": "2" }, "id": "GIZMO2" },
-					{ "color": "GREEN","owner": { "name": "Owner3", "id": "3" }, "id": "GIZMO3" }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-					owner {
-						id
-						name
-					}
-				}
-			}`
-
-		expectedJSON := `
-			{
-				"gizmos": [
-					{ "id": "GIZMO1", "color": "RED", "owner": { "id": "1", "name": "Owner1" } },
-					{ "id": "GIZMO2", "color": "BLUE", "owner": { "id": "2", "name": "Owner2" } },
-					{ "id": "GIZMO3", "color": "GREEN", "owner": { "id": "3", "name": "Owner3" } }
-				]
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.JSONEq(t, expectedJSON, string(bodyJSON))
-	})
-
-	t.Run("null data", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-			gizmo: Gizmo!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "color": "RED","owner": null, "id": "GIZMO1" },
-					{ "color": "BLUE","owner": { "name": "Owner2", "id": "2" }, "id": "GIZMO2" },
-					{ "color": "GREEN","owner": { "name": null, "id": "3" }, "id": "GIZMO3" }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-					owner {
-						id
-						name
-					}
-				}
-			}`
-
-		expectedJSON := `
-			{
-				"gizmos": [
-					{ "id": "GIZMO1", "color": "RED", "owner": null },
-					{ "id": "GIZMO2", "color": "BLUE", "owner": { "id": "2", "name": "Owner2" } },
-					{ "id": "GIZMO3", "color": "GREEN", "owner": { "id": "3", "name": null } }
-				]
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.JSONEq(t, expectedJSON, string(bodyJSON))
-	})
-
-	t.Run("simple response with errors", func(t *testing.T) {
-		ddl := `
-		type Gizmo {
-			id: ID!
-			color: String!
-			owner: Owner
-		}
-
-		type Owner {
-			id: ID!
-			name: String!
-		}
-
-		type Query {
-			gizmos: [Gizmo!]!
-		}`
-
-		result := jsonToInterfaceMap(`
-			{
-				"gizmos": [
-					{ "color": "RED","owner": { "name": "Owner1", "id": "1" }, "id": "GIZMO1" },
-					{ "color": "BLUE","owner": { "name": "Owner2", "id": "2" }, "id": "GIZMO2" },
-					{ "color": "GREEN","owner": { "name": "Owner3", "id": "3" }, "id": "GIZMO3" }
-				]
-			}
-		`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-			{
-				gizmos {
-					id
-					color
-					owner {
-						id
-						name
-					}
-				}
-			}`
-
-		expectedJSON := `
-			{
-				"gizmos": [
-					{ "id": "GIZMO1", "color": "RED", "owner": { "id": "1", "name": "Owner1" } },
-					{ "id": "GIZMO2", "color": "BLUE", "owner": { "id": "2", "name": "Owner2" } },
-					{ "id": "GIZMO3", "color": "GREEN", "owner": { "id": "3", "name": "Owner3" } }
-				]
-			}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.JSONEq(t, expectedJSON, string(bodyJSON))
-	})
-
-	t.Run("field selection overlaps with fragment selection", func(t *testing.T) {
-		ddl := `
-			interface Gizmo {
-				id: ID!
-				name: String!
-			}
-
-			type Owner {
-				id: ID!
-				fullName: String!
-			}
-
-			type Gadget implements Gizmo {
-				id: ID!
-				name: String!
-				owner: Owner
-			}
-
-			type Query {
-				gizmo: Gizmo!
-			}
-		`
-
-		result := jsonToInterfaceMap(`{
-			"gizmo": {
-				"id": "GADGET1",
-				"name": "Gadget #1",
-				"owner": {
-					"id": "OWNER1",
-					"fullName": "James Bond"
-				},
-				"_bramble__typename": "Gadget",
-				"__typename": "Gadget"
-			}
-		}`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-		query Gizmo {
-			gizmo {
-				__typename
-				...GizmoDetails
-			}
-		}
-
-		fragment GizmoDetails on Gizmo {
-			id
-			name
-			... on Gadget {
-				id
-				name
-				owner {
-					id
-					fullName
-				}
-			}
-		}`
-
-		expectedJSON := `
-		{
-			"gizmo": {
-				"id": "GADGET1",
-				"name": "Gadget #1",
-				"owner": {
-					"id": "OWNER1",
-					"fullName": "James Bond"
-				},
-				"__typename": "Gadget"
-			}
-		}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.JSONEq(t, expectedJSON, string(bodyJSON))
-	})
-
-	t.Run("field selection entirely overlaps with fragment selection", func(t *testing.T) {
-		ddl := `
-			interface Gizmo {
-				id: ID!
-				name: String!
-			}
-
-			type Owner {
-				id: ID!
-				fullName: String!
-			}
-
-			type Gadget implements Gizmo {
-				id: ID!
-				name: String!
-				owner: Owner
-			}
-
-			type Query {
-				gizmo: Gizmo!
-			}
-		`
-
-		result := jsonToInterfaceMap(`{
-			"gizmo": {
-				"id": "GADGET1",
-				"name": "Gadget #1",
-				"_bramble__typename": "Gadget",
-				"__typename": "Gadget"
-			}
-		}
-	`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-		query Gizmo {
-			gizmo {
-				...GizmoDetails
-				__typename
-			}
-		}
-
-		fragment GizmoDetails on Gizmo {
-			id
-			name
-			... on Gadget {
-				id
-				name
-			}
-		}`
-
-		expectedJSON := `
-		{
-			"gizmo": {
-				"id": "GADGET1",
-				"name": "Gadget #1",
-				"__typename": "Gadget"
-			}
-		}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.JSONEq(t, expectedJSON, string(bodyJSON))
-	})
-
-	t.Run("multiple implementation fragment spreads", func(t *testing.T) {
-		ddl := `
-			interface Gizmo {
-				id: ID!
-				name: String!
-			}
-
-			type Owner {
-				id: ID!
-				fullName: String!
-			}
-
-			type Gadget implements Gizmo {
-				id: ID!
-				name: String!
-				owner: Owner
-			}
-
-			type Tool implements Gizmo {
-				id: ID!
-				name: String!
-				category: String!
-			}
-
-			type Query {
-				gizmo: Gizmo!
-			}
-		`
-
-		result := jsonToInterfaceMap(`{
-			"gizmo": {
-				"id": "GADGET1",
-				"name": "Gadget #1",
-				"__typename": "Gadget",
-				"_bramble__typename": "Gadget"
-			}
-		}
-	`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-		query Gizmo {
-			gizmo {
-				...GizmoDetails
-				__typename
-			}
-		}
-
-		fragment GizmoDetails on Gizmo {
-			id
-			name
-			... on Gadget {
-				id
-				name
-			}
-			... on Tool {
-				category
-			}
-		}`
-
-		expectedJSON := `
-		{
-			"gizmo": {
-				"id": "GADGET1",
-				"name": "Gadget #1",
-				"__typename": "Gadget"
-			}
-		}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.JSONEq(t, expectedJSON, string(bodyJSON))
-	})
-
-	t.Run("multiple implementation fragment spreads (bottom fragment matches)", func(t *testing.T) {
-		ddl := `
-			interface Gizmo {
-				id: ID!
-				name: String!
-			}
-
-			type Owner {
-				id: ID!
-				fullName: String!
-			}
-
-			type Gadget implements Gizmo {
-				id: ID!
-				name: String!
-				owner: Owner
-			}
-
-			type Tool implements Gizmo {
-				id: ID!
-				name: String!
-				category: String!
-			}
-
-			type Query {
-				gizmo: Gizmo!
-			}
-		`
-
-		result := jsonToInterfaceMap(`{
-			"gizmo": {
-				"id": "TOOL1",
-				"name": "Tool #1",
-				"category": "Screwdriver",
-				"_bramble__typename": "Tool",
-				"__typename": "Tool"
-			}
-		}
-	`)
-
-		schema := gqlparser.MustLoadSchema(&ast.Source{Name: "fixture", Input: ddl})
-
-		query := `
-		query Gizmo {
-			gizmo {
-				...GizmoDetails
-				__typename
-			}
-		}
-
-		fragment GizmoDetails on Gizmo {
-			id
-			name
-			... on Gadget {
-				id
-				name
-			}
-			... on Tool {
-				category
-			}
-		}`
-
-		expectedJSON := `
-		{
-			"gizmo": {
-				"id": "TOOL1",
-				"name": "Tool #1",
-				"category": "Screwdriver",
-				"__typename": "Tool"
-			}
-		}`
-
-		document := gqlparser.MustLoadQuery(schema, query)
-		bodyJSON := formatResponseData(schema, document.Operations[0].SelectionSet, result)
-		require.JSONEq(t, expectedJSON, string(bodyJSON))
-	})
 }
 
 func TestQueryExecutionWithTypename(t *testing.T) {
@@ -4117,9 +1618,9 @@ func TestQueryExecutionWithMultipleBoundaryQueries(t *testing.T) {
 					w.Write([]byte(`{
 						"data": {
 							"movies": [
-								{ "_bramble_id": "1", "id": "1", "title": "Test title 1" },
-								{ "_bramble_id": "2", "id": "2", "title": "Test title 2" },
-								{ "_bramble_id": "3", "id": "3", "title": "Test title 3" }
+								{ "_bramble_id": "1", "_bramble__typename": "Movie", "id": "1", "title": "Test title 1" },
+								{ "_bramble_id": "2", "_bramble__typename": "Movie", "id": "2", "title": "Test title 2" },
+								{ "_bramble_id": "3", "_bramble__typename": "Movie", "id": "3", "title": "Test title 3" }
 							]
 						}
 					}
@@ -4133,9 +1634,9 @@ func TestQueryExecutionWithMultipleBoundaryQueries(t *testing.T) {
 					json.NewDecoder(r.Body).Decode(&q)
 					w.Write([]byte(`{
 						"data": {
-							"_0": { "_bramble_id": "1", "id": "1", "release": 2007 },
-							"_1": { "_bramble_id": "2", "id": "2", "release": 2008 },
-							"_2": { "_bramble_id": "3", "id": "3", "release": 2009 }
+							"_0": { "_bramble_id": "1", "_bramble__typename": "Movie", "id": "1", "release": 2007 },
+							"_1": { "_bramble_id": "2", "_bramble__typename": "Movie", "id": "2", "release": 2008 },
+							"_2": { "_bramble_id": "3", "_bramble__typename": "Movie", "id": "3", "release": 2009 }
 						}
 					}
 					`))
@@ -4207,6 +1708,7 @@ func TestQueryExecutionMultipleServicesWithArray(t *testing.T) {
 							res += fmt.Sprintf(`
 								"_%d": {
 									"_bramble_id": "%s",
+									"_bramble__typename": "Movie",
 									"id": "%s",
 									"title": "title %s"
 								}`, i, id, id, id)
@@ -4217,6 +1719,7 @@ func TestQueryExecutionMultipleServicesWithArray(t *testing.T) {
 							"data": {
 								"movie": {
 									"_bramble_id": "%s",
+									"_bramble__typename": "Movie",
 									"id": "%s",
 									"title": "title %s"
 								}
@@ -4241,22 +1744,25 @@ func TestQueryExecutionMultipleServicesWithArray(t *testing.T) {
 						"data": {
 							"_0": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"compTitles": [
 									{
 										"_bramble_id": "2",
+										"_bramble__typename": "Movie",
 										"id": "2",
 										"compTitles": [
-											{ "_bramble_id": "3", "id": "3" },
-											{ "_bramble_id": "4", "id": "4" }
+											{ "_bramble_id": "3", "_bramble__typename": "Movie", "id": "3" },
+											{ "_bramble_id": "4", "_bramble__typename": "Movie", "id": "4" }
 										]
 									},
 									{
 										"_bramble_id": "3",
+										"_bramble__typename": "Movie",
 										"id": "3",
 										"compTitles": [
-											{ "_bramble_id": "4", "id": "4" },
-											{ "_bramble_id": "5", "id": "5" }
+											{ "_bramble_id": "4", "_bramble__typename": "Movie", "id": "4" },
+											{ "_bramble_id": "5", "_bramble__typename": "Movie", "id": "5" }
 										]
 									}
 								]
@@ -4405,6 +1911,7 @@ func TestQueryExecutionMultipleServicesWithNestedArrays(t *testing.T) {
 						res += fmt.Sprintf(`
 								"_%d": {
 									"_bramble_id": "%s",
+									"_bramble__typename": "Movie",
 									"id": "%s",
 									"title": "title %s"
 								}`, i, id, id, id)
@@ -4415,6 +1922,7 @@ func TestQueryExecutionMultipleServicesWithNestedArrays(t *testing.T) {
 							"data": {
 								"movie": {
 									"_bramble_id": "%s",
+									"_bramble__typename": "Movie",
 									"id": "%s",
 									"title": "title %s"
 								}
@@ -4439,14 +1947,17 @@ func TestQueryExecutionMultipleServicesWithNestedArrays(t *testing.T) {
 					"data": {
 						"_0": {
 							"_bramble_id": "1",
+							"_bramble__typename": "Movie",
 							"id": "1",
 							"compTitles": [[
 								{
 									"_bramble_id": "2",
+									"_bramble__typename": "Movie",
 									"id": "2"
 								},
 								{
 									"_bramble_id": "3",
+									"_bramble__typename": "Movie",
 									"id": "3"
 								}
 							]]
@@ -4508,6 +2019,7 @@ func TestQueryExecutionEmptyBoundaryResponse(t *testing.T) {
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "Test title"
 							}
@@ -4642,18 +2154,22 @@ func TestQueryExecutionWithInputObject(t *testing.T) {
 							otherMovie(arg: {id: "2", title: "another title"}) {
 								title
 								_bramble_id: id
+								_bramble__typename: __typename
 							}
 							_bramble_id: id
+							_bramble__typename: __typename
 						}
 					}`, q["query"])
 					w.Write([]byte(`{
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "Test title",
 								"otherMovie": {
 									"_bramble_id": "2",
+									"_bramble__typename": "Movie",
 									"title": "another title"
 								}
 							}
@@ -4678,6 +2194,7 @@ func TestQueryExecutionWithInputObject(t *testing.T) {
 						"data": {
 							"_0": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"release": 2007
 							}
@@ -4730,6 +2247,7 @@ func TestQueryExecutionMultipleObjects(t *testing.T) {
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "Test title"
 							}
@@ -4756,8 +2274,8 @@ func TestQueryExecutionMultipleObjects(t *testing.T) {
 						w.Write([]byte(`{
 							"data": {
 								"movies": [
-									{ "_bramble_id": "1", "id": "1", "release": 2007 },
-									{ "_bramble_id": "2", "id": "2", "release": 2018 }
+									{ "_bramble_id": "1", "_bramble__typename": "Movie", "id": "1", "release": 2007 },
+									{ "_bramble_id": "2", "_bramble__typename": "Movie", "id": "2", "release": 2018 }
 								]
 							}
 						}
@@ -4767,6 +2285,7 @@ func TestQueryExecutionMultipleObjects(t *testing.T) {
 							"data": {
 								"_0": {
 									"_bramble_id": "1",
+									"_bramble__typename": "Movie",
 									"id": "1",
 									"release": 2007
 								}
@@ -4887,6 +2406,7 @@ func TestQueryExecutionMultipleServicesWithSkipFalseDirectives(t *testing.T) {
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1"
 							}
 						}
@@ -4912,6 +2432,7 @@ func TestQueryExecutionMultipleServicesWithSkipFalseDirectives(t *testing.T) {
 						"data": {
 							"_0": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "no soup for you",
 								"gizmo": {
@@ -5036,6 +2557,7 @@ func TestQueryExecutionMultipleServicesWithIncludeTrueDirectives(t *testing.T) {
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1"
 							}
 						}
@@ -5061,6 +2583,7 @@ func TestQueryExecutionMultipleServicesWithIncludeTrueDirectives(t *testing.T) {
 						"data": {
 							"_0": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "yada yada yada",
 								"gizmo": {
@@ -5122,12 +2645,13 @@ func TestMutationExecution(t *testing.T) {
 				handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					var q map[string]string
 					json.NewDecoder(r.Body).Decode(&q)
-					assertQueriesEqual(t, schema1, `mutation { updateTitle(id: "2", title: "New title") { title _bramble_id: id } }`, q["query"])
+					assertQueriesEqual(t, schema1, `mutation { updateTitle(id: "2", title: "New title") { title _bramble_id: id _bramble__typename: __typename } }`, q["query"])
 
 					w.Write([]byte(`{
 						"data": {
 							"updateTitle": {
 								"_bramble_id": "2",
+								"_bramble__typename": "Movie",
 								"id": "2",
 								"title": "New title"
 							}
@@ -5150,6 +2674,7 @@ func TestMutationExecution(t *testing.T) {
 						"data": {
 							"_0": {
 								"_bramble_id": "2",
+								"_bramble__typename": "Movie",
 								"id": "2",
 								"release": 2007
 							}
@@ -5216,6 +2741,7 @@ func TestQueryExecutionWithUnions(t *testing.T) {
 							"data": {
 								"_0": {
 									"_bramble_id": "2",
+									"_bramble__typename": "Person",
 									"pet": {
 										"name": "felix",
 										"age": 2,
@@ -5245,6 +2771,7 @@ func TestQueryExecutionWithUnions(t *testing.T) {
 						"data": {
 							"person": {
 								"_bramble_id": "2",
+								"_bramble__typename": "Person",
 								"name": "Bob"
 							}
 						}
@@ -5321,6 +2848,7 @@ func TestQueryExecutionWithNamespaces(t *testing.T) {
 							"data": {
 								"_0": {
 									"_bramble_id": "CA7",
+									"_bramble__typename": "Cat",
 									"name": "Felix"
 								}
 							}
@@ -5372,6 +2900,7 @@ func TestQueryExecutionWithNamespaces(t *testing.T) {
 								"cats": {
 									"searchCat": {
 										"_bramble_id": "CA7",
+										"_bramble__typename": "Cat",
 										"id": "CA7"
 									}
 								}
@@ -5467,6 +2996,7 @@ func TestQueryWithBoundaryFields(t *testing.T) {
 						"data": {
 							"movie": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"title": "Test title"
 							}
@@ -5491,6 +3021,7 @@ func TestQueryWithBoundaryFields(t *testing.T) {
 						"data": {
 							"_0": {
 								"_bramble_id": "1",
+								"_bramble__typename": "Movie",
 								"id": "1",
 								"release": 2007
 							}
@@ -5589,16 +3120,19 @@ func TestQueryWithArrayBoundaryFields(t *testing.T) {
 							"randomMovies": [
 								{
 									"_bramble_id": "1",
+									"_bramble__typename": "Movie",
 									"id": "1",
 									"title": "Movie 1"
 								},
 								{
 									"_bramble_id": "2",
+									"_bramble__typename": "Movie",
 									"id": "2",
 									"title": "Movie 2"
 								},
 								{
 									"_bramble_id": "3",
+									"_bramble__typename": "Movie",
 									"id": "3",
 									"title": "Movie 3"
 								}
@@ -5625,16 +3159,19 @@ func TestQueryWithArrayBoundaryFields(t *testing.T) {
 							"_result": [
 								{
 									"_bramble_id": "1",
+									"_bramble__typename": "Movie",
 									"id": "1",
 									"release": 2007
 								},
 								{
 									"_bramble_id": "2",
+									"_bramble__typename": "Movie",
 									"id": "2",
 									"release": 2008
 								},
 								{
 									"_bramble_id": "3",
+									"_bramble__typename": "Movie",
 									"id": "3",
 									"release": 2009
 								}
@@ -5674,6 +3211,123 @@ func TestQueryWithArrayBoundaryFields(t *testing.T) {
 	}
 
 	f.checkSuccess(t)
+}
+
+func TestQueryWithAbstractType(t *testing.T) {
+	f := &queryExecutionFixture{
+		services: []testService{
+			{
+				schema: `
+				directive @boundary on OBJECT | FIELD_DEFINITION
+
+				interface Foo {
+				  id: ID!
+				}
+
+				type Bar implements Foo {
+				  id: ID!
+				  bar: String!
+				}
+
+				type Baz implements Foo @boundary {
+				  id: ID!
+				}
+
+				type Query {
+				  foos: [Foo!]!
+				  baz(id: ID!): Baz @boundary
+				}`,
+				handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(`{
+						"data": {
+							"foos": [
+								{
+									"_bramble_id": "1",
+									"_bramble__typename": "Baz",
+									"id": "1"
+								},
+								{
+									"_bramble__typename": "Bar",
+									"id": "2",
+									"bar": "bar"
+								}
+							]
+						}
+					}
+					`))
+				}),
+			},
+			{
+				schema: `
+					directive @boundary on OBJECT | FIELD_DEFINITION
+
+					type Baz @boundary {
+						id: ID!
+						baz: String!
+					}
+
+					type Query {
+						baz(id: ID!): Baz @boundary
+					}
+				`,
+				handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(`{
+						"data": {
+							"_0": {
+								"_bramble_id": "1",
+								"_bramble__typename": "Baz",
+								"id": "1",
+								"baz": "baz"
+							}
+						}
+					}
+					`))
+				}),
+			},
+		},
+		query: `{
+			foos {
+				id
+				... on Baz {
+					baz
+				}
+			}
+		}`,
+		expected: `{
+			"foos": [
+				{
+					"id": "1",
+					"baz": "baz"
+				},
+				{
+					"id": "2"
+				}
+			]
+		}`,
+	}
+
+	f.checkSuccess(t)
+}
+
+func TestMergeWithNull(t *testing.T) {
+	nullMap := make(map[string]interface{})
+	dataMap := map[string]interface{}{
+		"data": "foo",
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(`null`), &nullMap))
+
+	merged, err := mergeExecutionResults([]executionResult{
+		{
+			Data: nullMap,
+		},
+		{
+			Data: dataMap,
+		},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, dataMap, merged)
 }
 
 func TestSchemaUpdate_serviceError(t *testing.T) {
@@ -5817,7 +3471,7 @@ func (f *queryExecutionFixture) setup(t *testing.T) (*ExecutableSchema, func()) 
 	es.Locations = buildFieldURLMap(services...)
 	es.IsBoundary = buildIsBoundaryMap(services...)
 	if t.Name() == "TestQueryExecutionServiceTimeout" {
-		es.GraphqlClient.HTTPClient.Timeout = 200 * time.Millisecond
+		es.GraphqlClient.HTTPClient.Timeout = 10 * time.Millisecond
 	}
 
 	return es, func() {
