@@ -24,6 +24,7 @@ type executionResult struct {
 
 type queryExecution struct {
 	ctx            context.Context
+	operationName  string
 	schema         *ast.Schema
 	requestCount   int32
 	maxRequest     int32
@@ -34,10 +35,11 @@ type queryExecution struct {
 	results chan executionResult
 }
 
-func newQueryExecution(ctx context.Context, client *GraphQLClient, schema *ast.Schema, boundaryFields BoundaryFieldsMap, maxRequest int32) *queryExecution {
+func newQueryExecution(ctx context.Context, operationName string, client *GraphQLClient, schema *ast.Schema, boundaryFields BoundaryFieldsMap, maxRequest int32) *queryExecution {
 	group, ctx := errgroup.WithContext(ctx)
 	return &queryExecution{
 		ctx:            ctx,
+		operationName:  operationName,
 		schema:         schema,
 		graphqlClient:  client,
 		boundaryFields: boundaryFields,
@@ -90,16 +92,16 @@ func (q *queryExecution) Execute(queryPlan *QueryPlan) ([]executionResult, gqler
 func (q *queryExecution) executeRootStep(step *QueryPlanStep) error {
 	var document string
 
-	switch operationType := step.ParentType; operationType {
+	var variables map[string]interface{}
+	switch step.ParentType {
 	case queryObjectName, mutationObjectName:
-		document = strings.ToLower(operationType) + formatSelectionSet(q.ctx, q.schema, step.SelectionSet)
+		document, variables = formatDocument(q.ctx, q.schema, step.ParentType, step.SelectionSet)
 	default:
 		return errors.New("expected mutation or query root step")
 	}
 
 	var data map[string]interface{}
-
-	err := q.executeDocument(document, step.ServiceURL, &data)
+	err := q.executeDocument(document, variables, step.ServiceURL, &data)
 	if err != nil {
 		q.writeExecutionResult(step, data, err)
 		return nil
@@ -124,9 +126,11 @@ func (q *queryExecution) executeRootStep(step *QueryPlanStep) error {
 	return nil
 }
 
-func (q *queryExecution) executeDocument(document string, serviceURL string, response interface{}) error {
-	req := NewRequest(document).
-		WithHeaders(GetOutgoingRequestHeadersFromContext(q.ctx))
+func (q *queryExecution) executeDocument(query string, variables map[string]interface{}, serviceURL string, response interface{}) error {
+	req := NewRequest(query).
+		WithVariables(variables).
+		WithHeaders(GetOutgoingRequestHeadersFromContext(q.ctx)).
+		WithOperationName(q.operationName)
 	return q.graphqlClient.Request(q.ctx, serviceURL, req, &response)
 }
 
@@ -154,12 +158,12 @@ func (q *queryExecution) executeChildStep(step *QueryPlanStep, boundaryIDs []str
 		return err
 	}
 
-	documents, err := buildBoundaryQueryDocuments(q.ctx, q.schema, step, boundaryIDs, boundaryField, 50)
+	documents, variables, err := buildBoundaryQueryDocuments(q.ctx, q.schema, step, boundaryIDs, boundaryField, 50)
 	if err != nil {
 		return err
 	}
 
-	data, err := q.executeBoundaryQuery(documents, step.ServiceURL, boundaryField)
+	data, err := q.executeBoundaryQuery(documents, step.ServiceURL, variables, boundaryField)
 	if err != nil {
 		q.writeExecutionResult(step, data, err)
 		return nil
@@ -204,12 +208,12 @@ func extractNonNilBoundaryResults(data []interface{}) []interface{} {
 	return nonNilResults
 }
 
-func (q *queryExecution) executeBoundaryQuery(documents []string, serviceURL string, boundaryFieldGetter BoundaryField) ([]interface{}, error) {
+func (q *queryExecution) executeBoundaryQuery(documents []string, serviceURL string, variables map[string]interface{}, boundaryFieldGetter BoundaryField) ([]interface{}, error) {
 	output := make([]interface{}, 0)
 	if !boundaryFieldGetter.Array {
 		for _, document := range documents {
 			partialData := make(map[string]interface{})
-			err := q.executeDocument(document, serviceURL, &partialData)
+			err := q.executeDocument(document, variables, serviceURL, &partialData)
 			if err != nil {
 				return nil, err
 			}
@@ -228,7 +232,7 @@ func (q *queryExecution) executeBoundaryQuery(documents []string, serviceURL str
 		Result []interface{} `json:"_result"`
 	}{}
 
-	err := q.executeDocument(documents[0], serviceURL, &data)
+	err := q.executeDocument(documents[0], variables, serviceURL, &data)
 	return data.Result, err
 }
 
@@ -261,12 +265,13 @@ func (q *queryExecution) createGQLErrors(step *QueryPlanStep, err error) gqlerro
 				extensions = make(map[string]interface{})
 			}
 			extensions["selectionSet"] = formatSelectionSetSingleLine(q.ctx, q.schema, step.SelectionSet)
+			extensions["selectionPath"] = path
 			extensions["serviceName"] = step.ServiceName
 			extensions["serviceUrl"] = step.ServiceURL
 
 			outputErrs = append(outputErrs, &gqlerror.Error{
 				Message:    ge.Message,
-				Path:       path,
+				Path:       ge.Path,
 				Locations:  locs,
 				Extensions: extensions,
 			})
@@ -287,18 +292,20 @@ func (q *queryExecution) createGQLErrors(step *QueryPlanStep, err error) gqlerro
 }
 
 // The insertionPoint represents the level a piece of data should be inserted at, relative to the root of the root step's data.
-// However, results from a boundary query only contain a portion of that tree. For example, you could
+// However results from a boundary query only contain a portion of that tree. For example, you could
 // have insertionPoint: ["foo", "bar", "movies", "movie", "compTitles"], with the below example as the boundary result we're
 // crawling for ids:
 // [
-// 	 {
-//     "_bramble_id": "MOVIE1",
-//     "compTitles": [
-//       {
-//   	   "_bramble_id": "1"
-// 		 }
-//	   ]
-//   }
+//
+//		 {
+//	    "_bramble_id": "MOVIE1",
+//	    "compTitles": [
+//	      {
+//	  	   "_bramble_id": "1"
+//			 }
+//		   ]
+//	  }
+//
 // ]
 //
 // We therefore cannot use the insertionPoint as is in order to extract the boundary ids for the next child step.
@@ -428,15 +435,17 @@ func extractBoundaryIDs(data interface{}, insertionPoint []string, parentType st
 	}
 }
 
-func buildBoundaryQueryDocuments(ctx context.Context, schema *ast.Schema, step *QueryPlanStep, ids []string, parentTypeBoundaryField BoundaryField, batchSize int) ([]string, error) {
+func buildBoundaryQueryDocuments(ctx context.Context, schema *ast.Schema, step *QueryPlanStep, ids []string, parentTypeBoundaryField BoundaryField, batchSize int) ([]string, map[string]interface{}, error) {
+	operation, variables := formatOperation(ctx, step.SelectionSet)
+
 	selectionSetQL := formatSelectionSetSingleLine(ctx, schema, step.SelectionSet)
 	if parentTypeBoundaryField.Array {
-		qids := []string{}
+		var qids []string
 		for _, id := range ids {
 			qids = append(qids, fmt.Sprintf("%q", id))
 		}
 		idsQL := fmt.Sprintf("[%s]", strings.Join(qids, ", "))
-		return []string{fmt.Sprintf(`{ _result: %s(%s: %s) %s }`, parentTypeBoundaryField.Field, parentTypeBoundaryField.Argument, idsQL, selectionSetQL)}, nil
+		return []string{fmt.Sprintf(`query %s { _result: %s(%s: %s) %s }`, operation, parentTypeBoundaryField.Field, parentTypeBoundaryField.Argument, idsQL, selectionSetQL)}, variables, nil
 	}
 
 	var (
@@ -450,11 +459,11 @@ func buildBoundaryQueryDocuments(ctx context.Context, schema *ast.Schema, step *
 			selections = append(selections, selection)
 			selectionIndex++
 		}
-		document := "{ " + strings.Join(selections, " ") + " }"
+		document := fmt.Sprintf("query %s { %s }", operation, strings.Join(selections, " "))
 		documents = append(documents, document)
 	}
 
-	return documents, nil
+	return documents, variables, nil
 }
 
 func batchBy(items []string, batchSize int) (batches [][]string) {
@@ -467,9 +476,9 @@ func batchBy(items []string, batchSize int) (batches [][]string) {
 
 // When formatting the response data, the shape of the selection set has to potentially be modified to more closely resemble the shape
 // of the response. This only happens when running into fragments, there are two cases we need to deal with:
-//   1. the selection set of the target fragment has to be unioned with the selection set at the level for which the target fragment is referenced
-//   2. if the target fragments are an implementation of an abstract type, we need to use the __typename from the response body to check which
-//   implementation was resolved. Any fragments that do not match are dropped from the selection set.
+//  1. the selection set of the target fragment has to be unioned with the selection set at the level for which the target fragment is referenced
+//  2. if the target fragments are an implementation of an abstract type, we need to use the __typename from the response body to check which
+//     implementation was resolved. Any fragments that do not match are dropped from the selection set.
 func unionAndTrimSelectionSet(responseObjectTypeName string, schema *ast.Schema, selectionSet ast.SelectionSet) ast.SelectionSet {
 	filteredSelectionSet := eliminateUnwantedFragments(responseObjectTypeName, schema, selectionSet)
 	return mergeWithTopLevelFragmentFields(filteredSelectionSet)
@@ -502,7 +511,6 @@ func eliminateUnwantedFragments(responseObjectTypeName string, schema *ast.Schem
 	}
 
 	return filteredSelectionSet
-
 }
 
 func includeFragment(responseObjectTypeName string, schema *ast.Schema, objectDefinition *ast.Definition, typeCondition string) bool {

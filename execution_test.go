@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -156,9 +155,10 @@ func TestQueryError(t *testing.T) {
 					{Line: 2, Column: 4},
 				},
 				Extensions: map[string]interface{}{
-					"code":         "NOT_FOUND",
-					"selectionSet": `{ movie(id: "1") { id title } }`,
-					"serviceName":  "",
+					"code":          "NOT_FOUND",
+					"selectionSet":  `{ movie(id: "1") { id title } }`,
+					"selectionPath": ast.Path{ast.PathName("movie")},
+					"serviceName":   "",
 				},
 			},
 			&gqlerror.Error{
@@ -230,7 +230,6 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 						}
 					}
 				}`))
-
 			} else {
 				w.Write([]byte(`
 				{
@@ -251,7 +250,6 @@ func TestFederatedQueryFragmentSpreads(t *testing.T) {
 						]
 					}
 				}`))
-
 			}
 		}),
 	}
@@ -1469,7 +1467,6 @@ func TestNestingNullableBoundaryTypes(t *testing.T) {
 
 		f.checkSuccess(t)
 	})
-
 }
 
 func TestQueryExecutionWithTypename(t *testing.T) {
@@ -2269,7 +2266,7 @@ func TestQueryExecutionMultipleObjects(t *testing.T) {
 					movies: [Movie!]
 				}`,
 				handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					body, _ := ioutil.ReadAll(r.Body)
+					body, _ := io.ReadAll(r.Body)
 					if strings.Contains(string(body), "movies") {
 						w.Write([]byte(`{
 							"data": {
@@ -2724,7 +2721,7 @@ func TestQueryExecutionWithUnions(t *testing.T) {
 					animals: [Animal]!
 				}`,
 				handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					b, _ := ioutil.ReadAll(r.Body)
+					b, _ := io.ReadAll(r.Body)
 					if strings.Contains(string(b), "animals") {
 						w.Write([]byte(`{
 							"data": {
@@ -2841,7 +2838,7 @@ func TestQueryExecutionWithNamespaces(t *testing.T) {
 					}
 				`,
 				handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					b, _ := ioutil.ReadAll(r.Body)
+					b, _ := io.ReadAll(r.Body)
 
 					if strings.Contains(string(b), "CA7") {
 						w.Write([]byte(`{
@@ -3574,9 +3571,14 @@ func assertQueriesEqual(t *testing.T, schema, expected, actual string) bool {
 }
 
 func testContextWithoutVariables(op *ast.OperationDefinition) context.Context {
+	if op == nil {
+		op = &ast.OperationDefinition{}
+	}
+
 	return AddPermissionsToContext(graphql.WithOperationContext(context.Background(), &graphql.OperationContext{
-		Variables: map[string]interface{}{},
-		Operation: op,
+		OperationName: op.Name,
+		Variables:     map[string]interface{}{},
+		Operation:     op,
 	}), OperationPermissions{
 		AllowedRootQueryFields:        AllowedFields{AllowAll: true},
 		AllowedRootMutationFields:     AllowedFields{AllowAll: true},
@@ -3585,9 +3587,14 @@ func testContextWithoutVariables(op *ast.OperationDefinition) context.Context {
 }
 
 func testContextWithNoPermissions(op *ast.OperationDefinition) context.Context {
+	if op == nil {
+		op = &ast.OperationDefinition{}
+	}
+
 	return AddPermissionsToContext(graphql.WithOperationContext(context.Background(), &graphql.OperationContext{
-		Variables: map[string]interface{}{},
-		Operation: op,
+		OperationName: op.Name,
+		Variables:     map[string]interface{}{},
+		Operation:     op,
 	}), OperationPermissions{
 		AllowedRootQueryFields:        AllowedFields{},
 		AllowedRootMutationFields:     AllowedFields{},
@@ -3596,9 +3603,14 @@ func testContextWithNoPermissions(op *ast.OperationDefinition) context.Context {
 }
 
 func testContextWithVariables(vars map[string]interface{}, op *ast.OperationDefinition) context.Context {
+	if op == nil {
+		op = &ast.OperationDefinition{}
+	}
+
 	return AddPermissionsToContext(graphql.WithResponseContext(graphql.WithOperationContext(context.Background(), &graphql.OperationContext{
-		Variables: vars,
-		Operation: op,
+		OperationName: op.Name,
+		Variables:     vars,
+		Operation:     op,
 	}), graphql.DefaultErrorPresenter, graphql.DefaultRecover), OperationPermissions{
 		AllowedRootQueryFields:        AllowedFields{AllowAll: true},
 		AllowedRootMutationFields:     AllowedFields{AllowAll: true},

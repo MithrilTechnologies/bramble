@@ -169,14 +169,24 @@ type Request struct {
 }
 
 // NewRequest creates a new GraphQL requests from the provided body.
-func NewRequest(body string) *Request {
+func NewRequest(query string) *Request {
 	return &Request{
-		Query: body,
+		Query: query,
 	}
 }
 
 func (r *Request) WithHeaders(headers http.Header) *Request {
 	r.Headers = headers
+	return r
+}
+
+func (r *Request) WithOperationName(operationName string) *Request {
+	r.OperationName = operationName
+	return r
+}
+
+func (r *Request) WithVariables(variables map[string]interface{}) *Request {
+	r.Variables = variables
 	return r
 }
 
