@@ -2,12 +2,10 @@ package plugins
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 
 	"github.com/MithrilTechnologies/bramble"
 	"github.com/rs/cors"
-	"github.com/sirupsen/logrus"
 )
 
 func init() {
@@ -48,7 +46,7 @@ func (p *CorsPlugin) middleware(h http.Handler) http.Handler {
 		Debug:            p.config.Debug,
 	})
 	if p.config.Debug {
-		c.Log = log.New(logrus.StandardLogger().Writer(), "cors:", log.Lshortfile)
+		// c.Log = log.New(logrus.StandardLogger().Writer(), "cors:", log.Lshortfile)
 	}
 	return c.Handler(h)
 }
