@@ -80,18 +80,18 @@ func (s *ExecutableSchema) UpdateSchema(forceRebuild bool) error {
 		}
 	}()
 
-	promServiceUpdateError.Reset()
-
 	for url, s := range s.Services {
 		logger := log.WithField("url", url)
 		updated, err := s.Update()
 		if err != nil {
-			promServiceUpdateError.WithLabelValues(s.ServiceURL).Inc()
+			promServiceUpdateErrorCounter.WithLabelValues(s.ServiceURL).Inc()
+			promServiceUpdateErrorGauge.WithLabelValues(s.ServiceURL).Set(1)
 			invalidSchema, forceRebuild = true, true
 			logger.WithError(err).Error("unable to update service")
 			// Ignore this service in this update
 			continue
 		}
+		promServiceUpdateErrorGauge.WithLabelValues(s.ServiceURL).Set(0)
 		logger = log.WithFields(log.Fields{
 			"version": s.Version,
 			"service": s.Name,
@@ -170,7 +170,7 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 	})
 
 	if err != nil {
-		return graphql.ErrorResponse(ctx, err.Error())
+		return s.interceptResponse(ctx, operation.Name, operationCtx.RawQuery, variables, graphql.ErrorResponse(ctx, err.Error()))
 	}
 
 	extensions := make(map[string]interface{})
@@ -199,9 +199,9 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 	qe := newQueryExecution(ctx, operationCtx.OperationName, s.GraphqlClient, filteredSchema, s.BoundaryQueries, int32(s.MaxRequestsPerQuery))
 	results, executeErrs := qe.Execute(plan)
 	if len(executeErrs) > 0 {
-		return &graphql.Response{
+		return s.interceptResponse(ctx, operation.Name, operationCtx.RawQuery, variables, &graphql.Response{
 			Errors: executeErrs,
-		}
+		})
 	}
 
 	var headers http.Header
@@ -240,9 +240,9 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 	if err != nil {
 		errs = append(errs, &gqlerror.Error{Message: err.Error()})
 		AddField(ctx, "errors", errs)
-		return &graphql.Response{
+		return s.interceptResponse(ctx, operation.Name, operationCtx.RawQuery, variables, &graphql.Response{
 			Errors: errs,
-		}
+		})
 	}
 
 	bubbleErrs, err := bubbleUpNullValuesInPlace(filteredSchema, operation.SelectionSet, mergedResult)
@@ -251,9 +251,9 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 	} else if err != nil {
 		errs = append(errs, &gqlerror.Error{Message: err.Error()})
 		AddField(ctx, "errors", errs)
-		return &graphql.Response{
+		return s.interceptResponse(ctx, operation.Name, operationCtx.RawQuery, variables, &graphql.Response{
 			Errors: errs,
-		}
+		})
 	}
 
 	errs = append(errs, bubbleErrs...)
@@ -267,10 +267,17 @@ func (s *ExecutableSchema) ExecuteQuery(ctx context.Context) *graphql.Response {
 		AddField(ctx, "errors", errs)
 	}
 
-	return &graphql.Response{
+	return s.interceptResponse(ctx, operation.Name, operationCtx.RawQuery, variables, &graphql.Response{
 		Data:   formattedResponse,
 		Errors: errs,
+	})
+}
+
+func (s *ExecutableSchema) interceptResponse(ctx context.Context, operationName, rawQuery string, variables map[string]interface{}, response *graphql.Response) *graphql.Response {
+	for _, plugin := range s.plugins {
+		response = plugin.InterceptResponse(ctx, operationName, rawQuery, variables, response)
 	}
+	return response
 }
 
 // Schema returns the merged schema
