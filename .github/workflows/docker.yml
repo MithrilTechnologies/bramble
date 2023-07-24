@@ -18,12 +18,6 @@ jobs:
       - name: Set BRAMBLE_VERSION env
         run: echo "BRAMBLE_VERSION=$(git describe --tags --abbrev=0)" >> $GITHUB_ENV
 
-      - name: Docker meta
-        id: docker_meta
-        uses: docker/metadata-action@v3
-        with:
-          images: ghcr.io/MithrilTechnologies/bramble
-
       - name: Login to ghcr.io
         uses: docker/login-action@v2
         with:
